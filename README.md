@@ -8,6 +8,7 @@
 
 ## 🧠 Decentralized Chess Rating System – Architecture (Text-Based)
 
+```plaintext
 +--------------------------+
 |      User Device         |
 |--------------------------|
@@ -49,6 +50,9 @@
 | - Merkle root anchor     |
 | - Integrity guarantee    |
 +--------------------------+
+```
+
+This updated architecture diagram is now formatted in a clean and visually appealing way using a code block for better readability.
 
 ![image](https://github.com/user-attachments/assets/80845a45-9eb5-455c-a28e-69ffc1c14af8)
 
