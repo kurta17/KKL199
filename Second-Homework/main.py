@@ -48,7 +48,16 @@ async def start_peers(n=100):
         builder = ConfigBuilder().clear_keys().clear_overlays()
         builder.add_key("peer", "medium", f"key{i}.pem")
         builder.add_overlay("MyCommunity", "peer",
+                            ## UNSTRUCTURED ##
+                            # Connected to 2 peers with random walk
+                            # [WalkerDefinition(Strategy.RandomWalk, 2, {'timeout': 3.0})]
+                            # Connected to 10 peers with random walk
                             [WalkerDefinition(Strategy.RandomWalk, 10, {'timeout': 3.0})],
+
+                            ## STRUCTURED ##
+                            # Connected to 99 peers with edge walk
+                            # WalkerDefinition(Strategy.EdgeWalk, 99, {"timeout": 3.0, "depth": 5})
+
                             default_bootstrap_defs, {}, [('started',)])
         cfg = builder.finalize()
         # Start each IPv8 instance on its own port
