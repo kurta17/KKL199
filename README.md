@@ -51,7 +51,7 @@
 [Users play a Match on chess.com or lichess.org]
    |
    v
-[Fetch match moves from website, Run function which identifies the Winner and signsthe  result]
+[Fetch match moves from website, Run function which identifies the Winner and signs the result]
 [Nodes Fetch Match Result via API (Win/Loss/Draw, Match ID)]
    |
    v
