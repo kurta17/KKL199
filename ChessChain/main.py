@@ -1,3 +1,17 @@
+# import ctypes
+# import os
+
+# libsodium_path = r"C:\Users\kerel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\libnacl\libsodium.dll"
+# if os.path.exists(libsodium_path):
+#     try:
+#         ctypes.WinDLL(libsodium_path)
+#         print(f"[+] Successfully loaded libsodium.dll from {libsodium_path}")
+#     except Exception as e:
+#         print(f"[!] Failed to load libsodium.dll: {e}")
+# else:
+#     print(f"[!] Could not find libsodium.dll at {libsodium_path}")
+
+
 import os
 import secrets
 import base64
@@ -59,6 +73,117 @@ class ChessTransaction(DataClassPayload[1]):
             pubkey=data["pubkey"],
             signature=data["signature"],
         )
+    
+class ChessCommunity(Community):
+    community_id = b'chess_platform123456'
+ 
+    def __init__(self, settings: CommunitySettings) -> None:
+        super().__init__(settings)
+        self.add_message_handler(ChessTransaction, self.on_transaction)
+        self.db_env = lmdb.open('chess_transactions_db', max_dbs=1, map_size=104857600)
+        self.db = self.db_env.open_db(b'transactions')
+ 
+        self.transactions: Set[str] = set()
+        self.mempool: List[ChessTransaction] = []
+        self.sent: Set[Tuple[bytes, str]] = set()  # track (peer_id, tx_nonce)
+ 
+        with self.db_env.begin(db=self.db, write=True) as txn:
+            for key, _ in txn.cursor():
+                self.transactions.add(key.decode())
+ 
+        self.sk = Ed25519PrivateKey.generate()
+        self.pk = self.sk.public_key()
+        self.pubkey_bytes = self.pk.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw
+        )
+        self.pubkey_b64 = base64.b64encode(self.pubkey_bytes).decode()
+ 
+    def started(self) -> None:
+        self.network.add_peer_observer(self)
+        create_task(self.periodic_broadcast())
+ 
+    def on_peer_added(self, peer: Peer) -> None:
+        print("New peer:", peer)
+ 
+    @lazy_wrapper(ChessTransaction)
+    def on_transaction(self, peer: Peer, payload: ChessTransaction) -> None:
+        # Verify signature
+        pubkey_bytes = base64.b64decode(payload.pubkey)
+        pubkey = Ed25519PublicKey.from_public_bytes(pubkey_bytes)
+        sig = base64.b64decode(payload.signature)
+        try:
+            pubkey.verify(sig, payload.nonce.encode())
+        except Exception:
+            print(f"Bad signature from {peer}, dropping TX {payload.nonce}")
+            return
+ 
+        # Deduplicate
+        if payload.nonce in self.transactions:
+            return
+ 
+        # Persist friend's transaction
+        with self.db_env.begin(db=self.db, write=True) as txn:
+            txn.put(payload.nonce.encode(), json.dumps(payload.to_dict()).encode())
+        self.transactions.add(payload.nonce)
+ 
+        # Add to mempool for gossip
+        self.mempool.append(payload)
+ 
+    def get_stored_transactions(self) -> List[ChessTransaction]:
+        txs: List[ChessTransaction] = []
+        with self.db_env.begin(db=self.db) as txn:
+            for key, raw in txn.cursor():
+                data = json.loads(raw.decode())
+                txs.append(ChessTransaction.from_dict(data))
+        return txs
+ 
+    async def periodic_broadcast(self):
+        while True:
+            for tx in list(self.mempool):
+                if not isinstance(tx, ChessTransaction):
+                    continue
+                for peer in self.get_peers():
+                    if peer != self.my_peer:
+                        peer_id = peer.mid
+                        if (peer_id, tx.nonce) not in self.sent:
+                            self.ez_send(peer, tx)
+                            self.sent.add((peer_id, tx.nonce))
+            await sleep(5.0)
+ 
+    def send_transaction(self, tx: ChessTransaction):
+        # ensure local storage and mempool
+        if tx.nonce not in self.transactions:
+            with self.db_env.begin(db=self.db, write=True) as txn:
+                txn.put(tx.nonce.encode(), json.dumps(tx.to_dict()).encode())
+            self.transactions.add(tx.nonce)
+            self.mempool.append(tx)
+ 
+        for peer in self.get_peers():
+            if peer != self.my_peer:
+                peer_id = peer.mid
+                if (peer_id, tx.nonce) not in self.sent:
+                    self.ez_send(peer, tx)
+                    self.sent.add((peer_id, tx.nonce))
+ 
+    def generate_fake_match(self):
+        match_id = str(uuid.uuid4())
+        p1, p2 = "alice", "bob"
+        moves = [
+            {"id": 1, "player": p1, "move": "e4", "signature": ""},
+            {"id": 2, "player": p2, "move": "e5", "signature": ""}
+        ]
+        moves_json = json.dumps(moves)
+        winner = p1
+        sk = Ed25519PrivateKey.generate()
+        pk = sk.public_key()
+        pubkey_b64 = base64.b64encode(
+            pk.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+        ).decode()
+        winner_sig = base64.b64encode(sk.sign(winner.encode())).decode()
+        nonce = match_id
+        tx_sig = base64.b64encode(sk.sign(nonce.encode())).decode()
+        return ChessTransaction(match_id, moves_json, winner, winner_sig, nonce, pubkey_b64, tx_sig, "{}")
 
 # Utility to check if port is free
 def check_port(port):
