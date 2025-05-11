@@ -9,50 +9,72 @@
 ## 🧠 Decentralized Chess Rating System – Architecture (Text-Based)
 
 ```plaintext
-+--------------------------+
-|      User Device         |
-|--------------------------|
-| - Game Fetcher (API)     |
-| - LMDB Game Store        |
-| - DID (Identity)         |
-| - Signature Engine       |
-|                          |
-| 1. Fetch game history    |
-| 2. Store in LMDB         |
-| 3. Sign game data        |
-+-----------+--------------+
-            |
-            v
-+--------------------------+
-|   IPv8 Overlay Network   |   <-- P2P layer
-|--------------------------|
-| - Peer Discovery         |
-| - Gossip Protocol        |
-| - DHT Key-Value Store    |
-|                          |
-| 4. Publish (key, value)  |
-| 5. Gossip data to peers  |
-+-----------+--------------+
-            |
-            v
-+--------------------------+
-|        Peers             |
-|--------------------------|
-| - Fetch data from DHT    |
-| - Verify signatures      |
-| - Cache game histories   |
-+-----------+--------------+
-            |
-            v
-+--------------------------+
-|       Blockchain         |
-|--------------------------|
-| - Merkle root anchor     |
-| - Integrity guarantee    |
-+--------------------------+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Platform Side !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+[User Registration]
+   |
+   v
+[Input Username (chess.com or lichess.org)]
+   |
+   v
+[System Queries API to Verify Username]
+   |
+   |--[If Valid]--> [Generate Private/Public Key Pair for User]
+   |                |
+   |                v
+   |                [Store in LMDB: User Data (Username, Platform, Public Key, Initial Rating)]
+   |                |
+   |                v
+   |                [Trigger Function: Send Welcome Notification to User]
+   |
+   |--[If Invalid]--> [Error: "Username Not Found, Cannot Register"]
+   |
+   |
+[Match Played]
+   |
+   v
+[Match Agreement at the end]
+   |
+   v
+   |
+   v
+[Both Sign Agreement: "I won/lose" with Private Keys]
+   |
+   v
+
+   |
+[Store in LMDB: Match Agreement (Match ID, Player1, Player2, Signatures(both or one), Moves, Timestamp)]
+   |              
+   |
+   |
+   v
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Network side !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   |
+   |
+[Peer gets data from LMDB]
+   |
+   |
+Peers verify the signatures of the win/lose message
+   |
+   |
+Makes a transaction for one match
+   |
+   |
+broadcast to other peers
+
+ Valid TX → PoS mempool
+   |
+   │
+   ↓
+PoS consensus:
+      ├─ Proposer election ∝ stake  !!!!!
+      ├─ Block proposal (TXs + Merkle root) !!!!!
+      └─ Validator voting/quorum !!!!!
+      |
+      ↓
+Finalized block → push‑gossip
+      |
+      ↓
+Peers validate & append block
+      
 ```
-
-This updated architecture diagram is now formatted in a clean and visually appealing way using a code block for better readability.
-
-![image](https://github.com/user-attachments/assets/80845a45-9eb5-455c-a28e-69ffc1c14af8)
-
