@@ -21,7 +21,7 @@ import socket
 from asyncio import run, create_task, sleep
 from dataclasses import dataclass
 import time
-from typing import Set, List
+from typing import Set, List, Tuple
 import uuid
 import lmdb
  
@@ -194,7 +194,26 @@ def check_port(port):
         except OSError:
             print(f"Port {port} is already in use. Please free the port or choose another.")
             return False
- 
+
+async def manual_send_loop(community: ChessCommunity):
+    while True:
+        cmd = input("Commands: show, send, showmempool, clearmempool > ").strip()
+        if cmd == "show":
+            print("Stored transactions in LMDB:")
+            for tx in community.get_stored_transactions():
+                print(f"  Nonce: {tx.nonce}, Match ID: {tx.match_id}, Winner: {tx.winner}")
+        elif cmd == "send":
+            tx = community.generate_fake_match()
+            community.send_transaction(tx)
+            print(f"Transaction {tx.nonce} generated and broadcasted.")
+        elif cmd == "showmempool":
+            print("Mempool:")
+            for tx in community.mempool:
+                print(f"  Nonce: {tx.nonce}, Match ID: {tx.match_id}")
+        elif cmd == "clearmempool":
+            community.mempool.clear()
+            print("Mempool cleared.")
+        await sleep(1)
  
 
 async def start_communities(port=8000):
