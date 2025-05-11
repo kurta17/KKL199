@@ -21,7 +21,45 @@ from ipv8.messaging.payload_dataclass import DataClassPayload
 from ipv8.types import Peer
 from ipv8.util import run_forever
 from ipv8_service import IPv8
- 
+
+@dataclass
+class ChessTransaction(DataClassPayload[1]):
+    match_id: str
+    moves: str  # JSON-encoded list of Move objects
+    winner: str
+    winner_signature: str  # base64 encoded
+    nonce: str
+    pubkey: str  # base64 encoded
+    signature: str
+    start_signatures: str = "{}"
+
+    def to_dict(self):
+        return {
+            "match_id": self.match_id,
+            "start_signatures": json.loads(self.start_signatures),
+            "moves": json.loads(self.moves),
+            "winner": self.winner,
+            "winner_signature": self.winner_signature,
+            "nonce": self.nonce,
+            "pubkey": self.pubkey,
+            "signature": self.signature,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        moves_json = json.dumps(data["moves"])
+        start_signatures_json = json.dumps(data.get("start_signatures", {}))
+        return cls(
+            match_id=data["match_id"],
+            start_signatures=start_signatures_json,
+            moves=moves_json,
+            winner=data["winner"],
+            winner_signature=data["winner_signature"],
+            nonce=data["nonce"],
+            pubkey=data["pubkey"],
+            signature=data["signature"],
+        )
+
 # Utility to check if port is free
 def check_port(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
