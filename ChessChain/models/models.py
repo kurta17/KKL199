@@ -10,15 +10,21 @@ from ipv8.messaging.payload_dataclass import DataClassPayload
 
 @dataclass
 class MoveData(DataClassPayload):
-    id: str
+    id: int  # Changed to int
     player: str
     move: str
     signature: str  # Base64-encoded signature of the move data f"{id}:{player}:{move}"
 
     def __post_init__(self):
-        if not isinstance(self.id, str):
-            self.id = str(self.id)
-        # Ensure other string fields are also strings, just in case
+        # Ensure id is int
+        if not isinstance(self.id, int):
+            original_id_repr = repr(getattr(self, 'id', 'MISSING'))
+            try:
+                self.id = int(self.id)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"MoveData.id ({original_id_repr}) must be an integer or a string convertible to an integer.") from e
+        
+        # Ensure other fields are strings
         if not isinstance(self.player, str):
             self.player = str(self.player)
         if not isinstance(self.move, str):
@@ -28,7 +34,7 @@ class MoveData(DataClassPayload):
 
     def to_dict(self):
         return {
-            "id": self.id,
+            "id": self.id, # self.id is now an int
             "player": self.player,
             "move": self.move,
             "signature": self.signature,
@@ -36,11 +42,36 @@ class MoveData(DataClassPayload):
 
     @classmethod
     def from_dict(cls, data):
+        if not isinstance(data, dict):
+            raise TypeError(f"MoveData.from_dict expects a dict, got {type(data)}")
+
+        try:
+            move_id_val = data["id"]
+        except KeyError:
+            raise ValueError("MoveData.from_dict: 'id' field is missing from input data.")
+        
+        try:
+            move_id = int(move_id_val)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"MoveData.from_dict: 'id' field ('{move_id_val}') must be an integer or a string convertible to an integer.") from e
+
+        player = data.get("player")
+        if player is None:
+            raise ValueError("MoveData.from_dict: 'player' field is missing.")
+        
+        move_val = data.get("move")
+        if move_val is None:
+            raise ValueError("MoveData.from_dict: 'move' field is missing.")
+
+        signature = data.get("signature")
+        if signature is None:
+            raise ValueError("MoveData.from_dict: 'signature' field is missing.")
+        
         return cls(
-            id=data["id"],
-            player=data["player"],
-            move=data["move"],
-            signature=data["signature"],
+            id=move_id,
+            player=str(player),
+            move=str(move_val),
+            signature=str(signature),
         )
 
 
@@ -90,17 +121,22 @@ class ChessTransaction(DataClassPayload[1]):
         processed_list = []
         for i, item in enumerate(current_moves_attr):
             if isinstance(item, MoveData):
+                item.__post_init__()  # Explicitly call __post_init__ to ensure types
                 processed_list.append(item)
             elif isinstance(item, dict):
                 try:
-                    processed_list.append(MoveData.from_dict(item))
+                    move_data = MoveData.from_dict(item)
+                    move_data.__post_init__()  # Explicitly call __post_init__ to ensure types
+                    processed_list.append(move_data)
                 except Exception as e:
                     print(f"Warning: ChessTransaction (nonce: {getattr(self, 'nonce', 'N/A')}), move item {i} (dict): Could not convert to MoveData: {e}")
             elif isinstance(item, str):
                 try:
                     move_dict = json.loads(item)
                     if isinstance(move_dict, dict):
-                        processed_list.append(MoveData.from_dict(move_dict))
+                        move_data = MoveData.from_dict(move_dict)
+                        move_data.__post_init__()  # Explicitly call __post_init__ to ensure types
+                        processed_list.append(move_data)
                     else:
                         print(f"Warning: ChessTransaction (nonce: {getattr(self, 'nonce', 'N/A')}), move item {i} (str): JSON string did not parse to a dict.")
                 except json.JSONDecodeError:
