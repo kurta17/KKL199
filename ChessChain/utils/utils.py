@@ -25,22 +25,24 @@ def check_port(port: int) -> bool:
             return False
 
 
-def vrf_sortition(sk: Ed25519PrivateKey, seed: bytes, total_stake: int, my_stake: int) -> bool:
-    """Proof of stake verifiable random function (VRF) for validator selection.
+# In utils/utils.py:
+def lottery_selection(seed_plus_id: bytes, my_stake: int, total_stake: int) -> bool:
+    """Lottery-based random selection based on stake.
     
     Args:
-        sk: Private key of the participant
-        seed: Random seed for the sortition
-        total_stake: Total stake in the system
+        seed_plus_id: Combined seed and validator ID
         my_stake: Stake of the participant
+        total_stake: Total stake in the system
         
     Returns:
         bool: True if the participant is selected, False otherwise
     """
-    sk_bytes = sk.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption()
-    )
-    h = hashlib.sha256(sk_bytes + seed).digest()
-    return (int.from_bytes(h, 'big') % total_stake) < my_stake
+    # Generate a deterministic random number from the seed + ID
+    hash_value = hashlib.sha256(seed_plus_id).digest()
+    random_value = int.from_bytes(hash_value, 'big') / 2**256  # Normalize to [0,1)
+    
+    # Calculate probability of selection based on stake
+    selection_probability = my_stake / total_stake if total_stake > 0 else 0
+    
+    # Select if the random value is less than the selection probability
+    return random_value < selection_probability

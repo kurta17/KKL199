@@ -15,7 +15,7 @@ from ipv8.types import Peer
 
 # Update imports for direct running from ChessChain directory
 from models.models import ChessTransaction, MoveData
-from utils.utils import vrf_sortition
+from utils.utils import lottery_selection
 
 
 class ChessCommunity(Community):
@@ -82,7 +82,7 @@ class ChessCommunity(Community):
         return sum(self.stakes.values())
 
     def select_validators(self, seed: bytes, k: int) -> List[bytes]:
-        """Select validators using VRF sortition.
+        """Select validators using lottery selection based on stake.
         
         Args:
             seed: Random seed for the sortition
@@ -94,7 +94,9 @@ class ChessCommunity(Community):
         total = self.total_stake()
         sel = []
         for pid, stake in self.stakes.items():
-            if vrf_sortition(self.sk, seed + pid, total, stake):
+            # Create a unique seed for each validator
+            combined_seed = seed + pid
+            if lottery_selection(combined_seed, stake, total):
                 sel.append(pid)
                 if len(sel) >= k: break
         return sel
@@ -302,4 +304,4 @@ class ChessCommunity(Community):
             committee = self.select_validators(seed, 5)
             print("Committee:", [base64.b64encode(c)[:8].decode() for c in committee])
             
-            await sleep(50)
+            await sleep(5)
