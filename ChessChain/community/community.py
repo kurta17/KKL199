@@ -22,6 +22,7 @@ class ChessCommunity(Community):
     """Community implementation for chess game transactions using IPv8."""
     
     community_id = b'chess_platform123456'
+    INITIAL_STAKE = 120
 
     def __init__(self, settings: CommunitySettings) -> None:
         """Initialize the chess community."""
@@ -54,6 +55,10 @@ class ChessCommunity(Community):
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
+        
+        # Assign initial stake to this peer if it doesn't have any
+        if self.pubkey_bytes not in self.stakes:
+            self.stake_tokens(self.INITIAL_STAKE)
 
     def stake_tokens(self, amount: int) -> None:
         """Stake tokens in the system.
