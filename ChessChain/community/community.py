@@ -14,7 +14,7 @@ from ipv8.lazy_community import lazy_wrapper
 from ipv8.types import Peer
 
 # Update imports for direct running from ChessChain directory
-from models.models import ChessTransaction
+from models.models import ChessTransaction, MoveData
 from utils.utils import vrf_sortition
 
 
@@ -208,23 +208,48 @@ class ChessCommunity(Community):
         p2_sk = Ed25519PrivateKey.generate()
         p2_pk = p2_sk.public_key()
 
-        moves = [
-            {"id": 1, "player": "player1", "move": "e4", "signature": ""},
-            {"id": 2, "player": "player2", "move": "e5", "signature": ""},
-            {"id": 3, "player": "player1", "move": "Nf3", "signature": ""}
+        # Define the sequence of moves
+        raw_move_definitions = [
+            {"id": 1, "player": "player1", "move_str": "e4"},
+            {"id": 2, "player": "player2", "move_str": "e5"},
+            {"id": 3, "player": "player1", "move_str": "Nf3"}
         ]
         
-        # Sign each move
-        for move in moves:
-            move_data = f"{move['id']}:{move['player']}:{move['move']}".encode()
-            sk = p1_sk if move["player"] == "player1" else p2_sk
-            move["signature"] = base64.b64encode(sk.sign(move_data)).decode()
+        processed_moves: List[MoveData] = []
+        for move_def in raw_move_definitions:
+            move_id = move_def["id"]
+            player = move_def["player"]
+            move_value = move_def["move_str"] # Renamed to avoid conflict
+            
+            # Data to be signed for this specific move
+            move_data_to_sign = f"{move_id}:{player}:{move_value}".encode()
+            
+            # Determine signing key for the move
+            current_move_sk = p1_sk if player == "player1" else p2_sk
+            
+            # Sign the move
+            move_signature_bytes = current_move_sk.sign(move_data_to_sign)
+            move_signature_b64 = base64.b64encode(move_signature_bytes).decode()
+            
+            # Create MoveData object
+            move_data_object = MoveData(
+                id=move_id,  # Will be int
+                player=player,
+                move=move_value,
+                signature=move_signature_b64
+            )
+            processed_moves.append(move_data_object)
 
-        mv_str = json.dumps(moves)
-        winner = moves[-1]["player"]  # Last move's player wins
-        outcome = f"{mid}:{winner}:{mv_str}".encode()
-        p1_sig = base64.b64encode(p1_sk.sign(outcome)).decode()
-        p2_sig = base64.b64encode(p2_sk.sign(outcome)).decode()
+        # JSON string representation of moves for signing match outcome and transaction.
+        # This must match how ChessTransaction._serialize_moves_for_signing() works.
+        moves_json_str_for_signing = json.dumps([m.to_dict() for m in processed_moves])
+        
+        winner = processed_moves[-1].player  # Last move's player wins
+        
+        # Sign match outcome
+        outcome_to_sign = f"{mid}:{winner}:{moves_json_str_for_signing}".encode()
+        p1_outcome_sig = base64.b64encode(p1_sk.sign(outcome_to_sign)).decode()
+        p2_outcome_sig = base64.b64encode(p2_sk.sign(outcome_to_sign)).decode()
 
         p1_pk_str = base64.b64encode(
             p1_pk.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
@@ -233,24 +258,26 @@ class ChessCommunity(Community):
             p2_pk.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
         ).decode()
 
-        nonce = mid
-        tx_data = f"{mid}:{mv_str}:{winner}:{nonce}".encode()
-        tx_sig = base64.b64encode(self.sk.sign(tx_data)).decode()
+        nonce = mid # Using match_id as nonce
+        
+        # Sign transaction data
+        tx_data_to_sign = f"{mid}:{moves_json_str_for_signing}:{winner}:{nonce}".encode()
+        tx_overall_sig = base64.b64encode(self.sk.sign(tx_data_to_sign)).decode()
         tx_pk_str = base64.b64encode(
             self.pk.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
         ).decode()
 
         return ChessTransaction(
             match_id=mid,
-            moves=mv_str,
+            moves=processed_moves,  # Pass the List[MoveData] directly
             winner=winner,
             player1_pubkey=p1_pk_str,
-            player1_signature=p1_sig,
+            player1_signature=p1_outcome_sig,
             player2_pubkey=p2_pk_str,
-            player2_signature=p2_sig,
+            player2_signature=p2_outcome_sig,
             nonce=nonce,
             tx_pubkey=tx_pk_str,
-            signature=tx_sig
+            signature=tx_overall_sig
         )
 
     async def pos_round(self) -> None:
