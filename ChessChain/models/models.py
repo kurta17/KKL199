@@ -15,6 +15,17 @@ class MoveData(DataClassPayload):
     move: str
     signature: str  # Base64-encoded signature of the move data f"{id}:{player}:{move}"
 
+    def __post_init__(self):
+        if not isinstance(self.id, str):
+            self.id = str(self.id)
+        # Ensure other string fields are also strings, just in case
+        if not isinstance(self.player, str):
+            self.player = str(self.player)
+        if not isinstance(self.move, str):
+            self.move = str(self.move)
+        if not isinstance(self.signature, str):
+            self.signature = str(self.signature)
+
     def to_dict(self):
         return {
             "id": self.id,
