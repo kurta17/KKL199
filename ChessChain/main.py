@@ -36,6 +36,18 @@ from ipv8.types import Peer
 from ipv8.util import run_forever
 from ipv8_service import IPv8
 
+
+# PoS VRF helper
+def vrf_sortition(sk: Ed25519PrivateKey, seed: bytes, total_stake: int, my_stake: int) -> bool:
+    sk_bytes = sk.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    h = hashlib.sha256(sk_bytes + seed).digest()
+    return (int.from_bytes(h, 'big') % total_stake) < my_stake
+
+
 @dataclass
 class ChessTransaction(DataClassPayload[1]):
     match_id: str
@@ -98,7 +110,30 @@ class ChessCommunity(Community):
             format=serialization.PublicFormat.Raw
         )
         self.pubkey_b64 = base64.b64encode(self.pubkey_bytes).decode()
- 
+    def stake_tokens(self, amount: int):
+        pid = self.pubkey_bytes
+        new = self.stakes.get(pid, 0) + amount
+        with self.db_env.begin(db=self.stake_db, write=True) as tx:
+            tx.put(pid, str(new).encode())
+        self.stakes[pid] = new
+        print(f"Staked {amount}, total stake: {new}")
+        
+    def total_stake(self) -> int:
+        return sum(self.stakes.values())
+    
+    def select_validators(self, seed: bytes, k: int) -> List[bytes]:
+        total = self.total_stake()
+        sel = []
+        for pid, stake in self.stakes.items():
+            if vrf_sortition(self.sk, seed + pid, total, stake):
+                sel.append(pid)
+                if len(sel) >= k: break
+        return sel
+
+    def select_proposer(self, seed: bytes) -> bytes:
+        vs = self.select_validators(seed, 1)
+        return vs[0] if vs else None
+    
     def started(self) -> None:
         self.network.add_peer_observer(self)
         create_task(self.periodic_broadcast())
