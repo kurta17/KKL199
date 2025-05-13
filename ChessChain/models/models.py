@@ -7,6 +7,25 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 from ipv8.messaging.payload_dataclass import DataClassPayload
 
+CHESS_TRANSACTION_MSG_ID = 1
+PROPOSED_BLOCK_MSG_ID = 2
+PROPOSER_ANNOUNCEMENT_MSG_ID = 3
+
+@dataclass
+class ProposedBlockPayload(DataClassPayload[PROPOSED_BLOCK_MSG_ID]):
+    """Payload for broadcasting a proposed block."""
+    round_seed_hex: str
+    transactions_json: str
+    proposer_pubkey_hex: str
+    signature: str
+
+@dataclass
+class ProposerAnnouncement(DataClassPayload[PROPOSER_ANNOUNCEMENT_MSG_ID]):
+    """Payload for a peer announcing it is the proposer for a round."""
+    round_seed_hex: str
+    proposer_pubkey_hex: str
+
+
 
 @dataclass
 class MoveData(DataClassPayload):
