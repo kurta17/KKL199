@@ -11,10 +11,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from cryptography.hazmat.primitives import serialization
 from ipv8.community import Community, CommunitySettings
 from ipv8.types import Peer
+from ipv8.lazy_community import lazy_wrapper
+
 
 from models.models import ChessTransaction, MoveData, ProposedBlockPayload, ProposerAnnouncement
 from utils.utils import lottery_selection
-from .messages import on_transaction, on_proposed_block, on_proposer_announcement
+from .messages import on_transaction, on_proposed_block, on_proposer_announcement, on_move
 
 
 class ChessCommunity(Community):
@@ -32,8 +34,8 @@ class ChessCommunity(Community):
         self.add_message_handler(ProposedBlockPayload, on_proposed_block)
         self.add_message_handler(ProposerAnnouncement, on_proposer_announcement)
         
-        self.add_message_handler(ChessTransaction, self.on_transaction)
-        self.add_message_handler(MoveData, self.on_move)
+        self.add_message_handler(ChessTransaction, on_transaction)
+        self.add_message_handler(MoveData, on_move)
        
         # Set up databases
         self.db_env = lmdb.open('chess_db', max_dbs=3, map_size=10**8)
@@ -95,31 +97,6 @@ class ChessCommunity(Community):
         """Called when a new peer is added."""
         print("New peer:", peer)
  
-    @lazy_wrapper(MoveData)
-    def on_move(self, peer: Peer, payload: MoveData) -> None:
-        """Handle incoming move messages."""
-        key = f"{payload.match_id}:{payload.id}".encode()
-        with self.db_env.begin(db=self.moves_db, write=True) as tx:
-            if tx.get(key):
-                print(f"Move {payload.id} for match {payload.match_id} already exists")
-                return
-            tx.put(key, json.dumps(payload.to_dict()).encode())
-        print(f"Stored move {payload.id} for match {payload.match_id} from {peer}")
- 
-    @lazy_wrapper(ChessTransaction)
-    def on_transaction(self, peer: Peer, payload: ChessTransaction) -> None:
-        """Handle incoming transactions with verification."""
-        if payload.nonce in self.transactions:
-            print(f"Transaction {payload.nonce} already processed")
-            return
-        if not payload.verify_signatures():
-            print(f"Transaction {payload.nonce} failed verification")
-            return
-        with self.db_env.begin(db=self.tx_db, write=True) as tx:
-            tx.put(payload.nonce.encode(), json.dumps(payload.to_dict()).encode())
-        self.transactions.add(payload.nonce)
-        self.mempool.append(payload)
-        print(f"Accepted transaction {payload.nonce} from {peer}")
  
     def get_stored_transactions(self) -> List[ChessTransaction]:
         """Get all transactions stored in the database."""
@@ -230,8 +207,8 @@ class ChessCommunity(Community):
         tx_pk_str = base64.b64encode(
             self.pk.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
         ).decode()
- 
-        return ChessTransaction(
+        # Send_transaction
+        tx = ChessTransaction(
             match_id=match_id,
             winner=winner,
             player1_pubkey=p1_pk_str,
@@ -242,6 +219,8 @@ class ChessCommunity(Community):
             tx_pubkey=tx_pk_str,
             signature=tx_sig
         )
+        self.send_transaction(tx)
+
  
     def generate_fake_match(self) -> None:
         """Generate a fake match and start sending moves."""
@@ -279,16 +258,28 @@ class ChessCommunity(Community):
             if proposer:
                 self.logger.info(f"Proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
                 # Announce to the network
-                self.ez_send_all(ProposerAnnouncement(seed.hex(), self.pubkey_bytes.hex()))
+                for p in self.get_peers():
+                    if p.mid != self.pubkey_bytes:
+                        self.ez_send(p, ProposerAnnouncement(seed.hex(), self.pubkey_bytes.hex()))
                 self.logger.info(f"Announced proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
                 # Create a block payload
                 block_payload = ProposedBlockPayload(seed.hex(), self.pubkey_bytes.hex(), self.get_stored_transactions())
+                #### creation of block payload logic goes here
+                # 
+                #
+                self.logger.info(f"Created block payload for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
                 # Send the block payload to the network
-                self.ez_send_all(block_payload)
+                for p in self.get_peers():
+                    if p.mid != self.pubkey_bytes:
+                        self.ez_send(p, block_payload)
+                self.sent.add((self.pubkey_bytes, seed.hex()))
                 self.logger.info(f"Sent block payload for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
             else:
                 self.logger.info(f"Not proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
-                # Optionally, listen for blocks from other proposers
+                await sleep(3) # wait for a while before get the block to validate
+                #
+                #
+                # listen for blocks from other proposers
                 # and validate them
                 # This would involve implementing a block validation method
                 # and storing valid blocks in a separate database
