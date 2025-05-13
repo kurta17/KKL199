@@ -10,24 +10,27 @@ import lmdb
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
 from ipv8.community import Community, CommunitySettings
-from ipv8.lazy_community import lazy_wrapper
 from ipv8.types import Peer
 
-# Update imports for direct running from ChessChain directory
-from models.models import ChessTransaction, MoveData
+from models.models import ChessTransaction, MoveData, ProposedBlockPayload, ProposerAnnouncement
 from utils.utils import lottery_selection
+from .messages import on_transaction, on_proposed_block, on_proposer_announcement
 
 
 class ChessCommunity(Community):
     """Community implementation for chess game transactions using IPv8."""
-    
     community_id = b'chess_platform123456'
+
     INITIAL_STAKE = 120
+    POS_ROUND_INTERVAL = 5
+    MIN_STAKE = 10
 
     def __init__(self, settings: CommunitySettings) -> None:
         """Initialize the chess community."""
         super().__init__(settings)
-        self.add_message_handler(ChessTransaction, self.on_transaction)
+        self.add_message_handler(ChessTransaction, on_transaction)
+        self.add_message_handler(ProposedBlockPayload, on_proposed_block)
+        self.add_message_handler(ProposerAnnouncement, on_proposer_announcement)
         
         # Set up databases
         self.db_env = lmdb.open('chess_db', max_dbs=2, map_size=10**8)
@@ -60,6 +63,7 @@ class ChessCommunity(Community):
         if self.pubkey_bytes not in self.stakes:
             self.stake_tokens(self.INITIAL_STAKE)
 
+    
     def stake_tokens(self, amount: int) -> None:
         """Stake tokens in the system.
         
@@ -81,37 +85,9 @@ class ChessCommunity(Community):
         """
         return sum(self.stakes.values())
 
-    def select_validators(self, seed: bytes, k: int) -> List[bytes]:
-        """Select validators using lottery selection based on stake.
-        
-        Args:
-            seed: Random seed for the sortition
-            k: Number of validators to select
-            
-        Returns:
-            List[bytes]: List of selected validator public keys
-        """
-        total = self.total_stake()
-        sel = []
-        for pid, stake in self.stakes.items():
-            # Create a unique seed for each validator
-            combined_seed = seed + pid
-            if lottery_selection(combined_seed, stake, total):
-                sel.append(pid)
-                if len(sel) >= k: break
-        return sel
-
-    def select_proposer(self, seed: bytes) -> bytes:
-        """Select a proposer for block creation.
-        
-        Args:
-            seed: Random seed for the selection
-            
-        Returns:
-            bytes: Public key of the selected proposer, or None
-        """
-        vs = self.select_validators(seed, 1)
-        return vs[0] if vs else None
+    def checking_proposer(self, seed: bytes) -> bytes:
+        """Peer is checking if it is the proposer for a given seed."""
+        return lottery_selection(seed_plus_id=seed + self.pubkey_bytes, my_stake=self.stakes[self.pubkey_bytes], total_stake=self.total_stake())
 
     def started(self) -> None:
         """Called when the community is started."""
@@ -123,29 +99,6 @@ class ChessCommunity(Community):
         """Called when a new peer is added."""
         print("New peer:", peer)
 
-    @lazy_wrapper(ChessTransaction)
-    def on_transaction(self, peer: Peer, payload: ChessTransaction) -> None:
-        """Handle incoming transactions with verification.
-        
-        Args:
-            peer: The peer that sent the transaction
-            payload: The transaction payload
-        """
-        if payload.nonce in self.transactions:
-            print(f"Transaction {payload.nonce} already processed")
-            return
-            
-        if not payload.verify_signatures():
-            print(f"Transaction {payload.nonce} failed verification")
-            return
-            
-        # Use JSON serialization instead of pack_low
-        with self.db_env.begin(db=self.tx_db, write=True) as tx:
-            tx.put(payload.nonce.encode(), json.dumps(payload.to_dict()).encode())
-            
-        self.transactions.add(payload.nonce)
-        self.mempool.append(payload)
-        print(f"Accepted transaction {payload.nonce} from {peer}")
 
     def get_stored_transactions(self) -> List[ChessTransaction]:
         """Get all transactions stored in the database.
@@ -281,27 +234,34 @@ class ChessCommunity(Community):
             tx_pubkey=tx_pk_str,
             signature=tx_overall_sig
         )
-
+    
+    
     async def pos_round(self) -> None:
         """Run a proof of stake consensus round."""
         while True:
+            await sleep(self.POS_ROUND_INTERVAL)
             seed = hashlib.sha256(str(time.time()).encode()).digest()
-            proposer = self.select_proposer(seed)
-            
-            if proposer == self.pubkey_bytes and self.mempool:
-                # Verify all transactions in mempool
-                valid_txs = [tx for tx in self.mempool if tx.verify_signatures()]
-                
-                if valid_txs:
-                    blk = [tx.to_dict() for tx in valid_txs]
-                    blob = json.dumps(blk).encode()
-                    psig = base64.b64encode(self.sk.sign(blob)).decode()
-                    print(f"Proposed block ({len(blk)} tx): {psig[:8]}...")
-                    self.mempool = [tx for tx in self.mempool if tx not in valid_txs]
-                else:
-                    print("No valid transactions to propose")
-                    
-            committee = self.select_validators(seed, 5)
-            print("Committee:", [base64.b64encode(c)[:8].decode() for c in committee])
-            
-            await sleep(5)
+
+            # check if mystake is more than MIN_STAKE
+            if self.stakes[self.pubkey_bytes] < self.MIN_STAKE:
+                print(f"Stake too low ({self.stakes[self.pubkey_bytes]}), not proposing")
+                continue
+            # check if we are the proposer
+            proposer = self.checking_proposer(seed)
+
+            if proposer:
+                self.logger.info(f"Proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
+                # Announce to the network
+                self.ez_send_all(ProposerAnnouncement(seed.hex(), self.pubkey_bytes.hex()))
+                self.logger.info(f"Announced proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
+                # Create a block payload
+                block_payload = ProposedBlockPayload(seed.hex(), self.pubkey_bytes.hex(), self.get_stored_transactions())
+                # Send the block payload to the network
+                self.ez_send_all(block_payload)
+                self.logger.info(f"Sent block payload for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
+            else:
+                self.logger.info(f"Not proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
+                # Optionally, listen for blocks from other proposers
+                # and validate them
+                # This would involve implementing a block validation method
+                # and storing valid blocks in a separate database
