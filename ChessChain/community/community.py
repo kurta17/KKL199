@@ -50,6 +50,7 @@ class ChessCommunity(Community):
         self.stakes: Dict[bytes, int] = {}
         self.pos_round_number = 0
         self.current_round_seed = None
+        self.pending_transactions: Dict[str, ChessTransaction] = {}  # Transactions in proposed blocks awaiting confirmation
  
         # Load existing transactions and stakes
         with self.db_env.begin(db=self.tx_db) as tx:
@@ -237,90 +238,150 @@ class ChessCommunity(Community):
         self.logger.info(f"Generating fake match {match_id} with {len(moves_list)} moves. Winner: {winner}, Nonce: {nonce}")
         create_task(self.send_moves(match_id, winner, moves_list, nonce))
  
+    def get_unprocessed_transactions(self) -> List[ChessTransaction]:
+        """Get transactions from the database that haven't been included in a block yet."""
+        out = []
+        # Add a DB to track which transactions have been included in confirmed blocks
+        processed_db = self.db_env.open_db(b'processed_transactions', create=True)
+        
+        with self.db_env.begin(db=self.tx_db) as txn:
+            with self.db_env.begin(db=processed_db) as processed_txn:
+                for key, raw in txn.cursor():
+                    # Skip if this transaction has been processed
+                    if processed_txn.get(key) is not None:
+                        continue
+                        
+                    try:
+                        deserialized_tx, _ = default_serializer.unpack_serializable(ChessTransaction, raw)
+                        out.append(deserialized_tx)
+                    except Exception as e:
+                        key_repr = key.hex() if isinstance(key, bytes) else str(key)
+                        print(f"Error loading transaction {key_repr}: {e}")
+        return out
+    
+    def mark_transactions_as_processed(self, transaction_hashes: List[str]) -> None:
+        """Mark transactions as processed after a block containing them is confirmed."""
+        processed_db = self.db_env.open_db(b'processed_transactions', create=True)
+        with self.db_env.begin(db=processed_db, write=True) as txn:
+            for tx_hash in transaction_hashes:
+                txn.put(tx_hash.encode(), b'1')
+                
+                # Remove from pending and mempool if present
+                if tx_hash in self.pending_transactions:
+                    del self.pending_transactions[tx_hash]
+                if tx_hash in self.mempool:
+                    del self.mempool[tx_hash]
+    
     async def pos_round(self) -> None:
         """Perform a round of PoS block proposal."""
-        self.pos_round_number += 1
-        current_time = time.time()
-        self.logger.info(f"Starting PoS round {self.pos_round_number} at {current_time}")
+        while True:
 
-        # Fetch transactions from storage (e.g., LMDB)
-        stored_transactions = self.get_stored_transactions()
-        transactions_to_propose: List[ChessTransaction] = []
-        processed_nonces = set()
+            self.pos_round_number += 1
+            current_time = time.time()
+            self.logger.info(f"Starting PoS round {self.pos_round_number} at {current_time}")
 
-        for tx in stored_transactions:
-            if tx.nonce not in processed_nonces:
-                transactions_to_propose.append(tx)
-                processed_nonces.add(tx.nonce)
-        
-        self.logger.info(f"Round {self.pos_round_number}: Fetched {len(transactions_to_propose)} transactions from DB.")
+            # Generate a round seed based on the current time
+            seed = hashlib.sha256(str(self.pos_round_number).encode()).digest()
 
-        # Add transactions from mempool that are not already included from DB
-        mempool_tx_count = 0
-        for nonce, tx_from_mempool in list(self.mempool.items()): 
-            if nonce not in processed_nonces:
-                if isinstance(tx_from_mempool, ChessTransaction):
-                    transactions_to_propose.append(tx_from_mempool)
-                    processed_nonces.add(nonce) 
-                    mempool_tx_count += 1
-                else:
-                    self.logger.warning(f"Mempool item with nonce {nonce} is not a ChessTransaction object, but {type(tx_from_mempool)}. Skipping.")
-        
-        if mempool_tx_count > 0:
-            self.logger.info(f"Round {self.pos_round_number}: Added {mempool_tx_count} unique transactions from mempool.")
-        
-        self.logger.info(f"Round {self.pos_round_number}: Total transactions to propose: {len(transactions_to_propose)}")
+            # check if mystake is more than MIN_STAKE
+            if self.stakes[self.pubkey_bytes] < self.MIN_STAKE:
+                print(f"Stake too low ({self.stakes[self.pubkey_bytes]}), not proposing")
+                continue
 
-        if not transactions_to_propose:
-            self.logger.info(f"Round {self.pos_round_number}: No transactions in mempool or DB to propose a block for.")
-            await sleep(self.POS_ROUND_INTERVAL)
-            return
+            # check if we are the proposer
+            proposer = self.checking_proposer(seed)
+            if proposer:
 
-        # Construct Merkle tree from transaction nonces
-        transaction_hashes = [tx.nonce for tx in transactions_to_propose]
-        if not transaction_hashes:
-            self.logger.warning(f"Round {self.pos_round_number}: Transaction hashes list is empty despite having transactions. This should not happen.")
-            await sleep(self.POS_ROUND_INTERVAL)
-            return
+                # Announce to the network
+                for p in self.get_peers():
+                    if p.mid != self.pubkey_bytes:
+                        self.ez_send(p, ProposerAnnouncement(seed.hex(), self.pubkey_bytes.hex()))
+                self.logger.info(f"Announced proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
 
-        merkle_tree = MerkleTree(transaction_hashes)
-        merkle_root = merkle_tree.get_root()
-        if not merkle_root:
-            self.logger.error(f"Round {self.pos_round_number}: Failed to generate Merkle root.")
-            await sleep(self.POS_ROUND_INTERVAL)
-            return
+                # Fetch only unprocessed transactions from storage
+                transactions_to_propose: List[ChessTransaction] = []
+                processed_nonces = set()
 
-        self.logger.info(f"Round {self.pos_round_number}: Merkle root for {len(transaction_hashes)} transactions: {merkle_root}")
+                # Fetch only recent/unprocessed transactions instead of all transactions
+                stored_transactions = self.get_unprocessed_transactions()
+                
+                for tx in stored_transactions:
+                    if tx.nonce not in processed_nonces:
+                        transactions_to_propose.append(tx)
+                        processed_nonces.add(tx.nonce)
+                
+                self.logger.info(f"Round {self.pos_round_number}: Fetched {len(transactions_to_propose)} unprocessed transactions from DB.")
 
-        # Create the proposed block payload
-        round_seed_hex = self.current_round_seed.hex() if self.current_round_seed else "0" * 64
-        proposer_pubkey_hex = self.pubkey_bytes.hex()
+                # Add transactions from mempool that are not already included from DB
+                mempool_tx_count = 0
+                for nonce, tx_from_mempool in list(self.mempool.items()): 
+                    if nonce not in processed_nonces:
+                        if isinstance(tx_from_mempool, ChessTransaction):
+                            transactions_to_propose.append(tx_from_mempool)
+                            processed_nonces.add(nonce) 
+                            mempool_tx_count += 1
+                        else:
+                            self.logger.warning(f"Mempool item with nonce {nonce} is not a ChessTransaction object, but {type(tx_from_mempool)}. Skipping.")
+                
+                if mempool_tx_count > 0:
+                    self.logger.info(f"Round {self.pos_round_number}: Added {mempool_tx_count} unique transactions from mempool.")
+                
+                self.logger.info(f"Round {self.pos_round_number}: Total transactions to propose: {len(transactions_to_propose)}")
 
-        block_data_to_sign_str = f"{round_seed_hex}:{merkle_root}:{proposer_pubkey_hex}"
-        block_data_to_sign_bytes = block_data_to_sign_str.encode('utf-8')
-        
-        try:
-            signature_hex = self.sk.sign(block_data_to_sign_bytes).hex()
-        except Exception as e:
-            self.logger.error(f"Round {self.pos_round_number}: Error signing block data: {e}")
-            await sleep(self.POS_ROUND_INTERVAL)
-            return
+                if not transactions_to_propose:
+                    self.logger.info(f"Round {self.pos_round_number}: No transactions in mempool or DB to propose a block for.")
+                    await sleep(self.POS_ROUND_INTERVAL)
+                    continue
 
-        proposed_block = ProposedBlockPayload(
-            round_seed_hex=round_seed_hex,
-            transaction_hashes=transaction_hashes,
-            merkle_root=merkle_root,
-            proposer_pubkey_hex=proposer_pubkey_hex,
-            signature=signature_hex
-        )
+                # Construct Merkle tree from transaction nonces
+                transaction_hashes = [tx.nonce for tx in transactions_to_propose]
+                if not transaction_hashes:
+                    self.logger.warning(f"Round {self.pos_round_number}: Transaction hashes list is empty despite having transactions. This should not happen.")
+                    await sleep(self.POS_ROUND_INTERVAL)
+                    continue
 
-        self.logger.info(f"Round {self.pos_round_number}: Proposing block with Merkle root {merkle_root} and {len(transaction_hashes)} transactions.")
-        for peer in self.get_peers():
-            self.ez_send(peer, proposed_block)
-        
-        for tx_nonce in transaction_hashes:
-            if tx_nonce in self.mempool:
-                del self.mempool[tx_nonce]
-        self.logger.info(f"Round {self.pos_round_number}: Cleared {len(transaction_hashes)} proposed transactions from mempool.")
+                merkle_tree = MerkleTree(transaction_hashes)
+                merkle_root = merkle_tree.get_root()
+                if not merkle_root:
+                    self.logger.error(f"Round {self.pos_round_number}: Failed to generate Merkle root.")
+                    await sleep(self.POS_ROUND_INTERVAL)
+                    continue
 
-        await sleep(self.POS_ROUND_INTERVAL)
+                self.logger.info(f"Round {self.pos_round_number}: Merkle root for {len(transaction_hashes)} transactions: {merkle_root}")
+
+                # Create the proposed block payload
+                round_seed_hex = seed.hex()
+                proposer_pubkey_hex = self.pubkey_bytes.hex()
+
+                block_data_to_sign_str = f"{round_seed_hex}:{merkle_root}:{proposer_pubkey_hex}"
+                block_data_to_sign_bytes = block_data_to_sign_str.encode('utf-8')
+                
+                try:
+                    signature_hex = self.sk.sign(block_data_to_sign_bytes).hex()
+                except Exception as e:
+                    self.logger.error(f"Round {self.pos_round_number}: Error signing block data: {e}")
+                    await sleep(self.POS_ROUND_INTERVAL)
+                    continue
+
+                proposed_block = ProposedBlockPayload(
+                    round_seed_hex=round_seed_hex,
+                    transaction_hashes=transaction_hashes,
+                    merkle_root=merkle_root,
+                    proposer_pubkey_hex=proposer_pubkey_hex,
+                    signature=signature_hex
+                )
+
+                self.logger.info(f"Round {self.pos_round_number}: Proposing block with Merkle root {merkle_root} and {len(transaction_hashes)} transactions.")
+                for peer in self.get_peers():
+                    self.ez_send(peer, proposed_block)
+                
+                # Mark transactions as pending instead of deleting them
+                for tx_nonce in transaction_hashes:
+                    if tx_nonce in self.mempool:
+                        # Move to pending state rather than deleting
+                        self.pending_transactions[tx_nonce] = self.mempool[tx_nonce]
+                        # Keep in mempool until confirmed
+                
+                self.logger.info(f"Round {self.pos_round_number}: Marked {len(transaction_hashes)} proposed transactions as pending confirmation.")
+
+                await sleep(self.POS_ROUND_INTERVAL)
