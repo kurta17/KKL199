@@ -69,17 +69,27 @@ async def on_proposer_announcement(self, peer: Peer, payload: ProposerAnnounceme
 
 
 @lazy_wrapper(ProposedBlockPayload)
-async def on_proposed_block(self, peer: Peer, payload: ProposedBlockPayload) -> None: # Made async to align with potential async operations
+async def on_proposed_block(self, peer: Peer, payload: ProposedBlockPayload) -> None:
     """Handles an incoming proposed block with full validation."""
     self.logger.info(f"Received ProposedBlockPayload for round {payload.round_seed_hex[:8]} from peer {peer.mid.hex()[:8] if peer else 'Unknown Peer'} (claimed proposer: {payload.proposer_pubkey_hex[:8]})")
 
     try:
         proposer_public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(payload.proposer_pubkey_hex))
-        block_data_to_verify_str = f"{payload.round_seed_hex}:{payload.merkle_root}:{payload.proposer_pubkey_hex}"
+        
+        # Update signature verification to include timestamp and previous block hash
+        block_data_to_verify_str = f"{payload.round_seed_hex}:{payload.merkle_root}:{payload.proposer_pubkey_hex}:{payload.previous_block_hash}:{payload.timestamp}"
         block_data_to_verify_bytes = block_data_to_verify_str.encode('utf-8')
         block_signature_bytes = bytes.fromhex(payload.signature)
+        
         proposer_public_key.verify(block_signature_bytes, block_data_to_verify_bytes)
         self.logger.info(f"Block signature VERIFIED for block by {payload.proposer_pubkey_hex[:8]} for round {payload.round_seed_hex[:8]}.")
+            
+        # Verify previous block hash is valid
+        latest_block_hash = self.get_latest_block_hash()
+        if payload.previous_block_hash != latest_block_hash:
+            self.logger.warning(f"Previous block hash mismatch. Expected {latest_block_hash}, got {payload.previous_block_hash}. Discarding.")
+            return
+        
     except InvalidSignature:
         self.logger.warning(f"Block signature INVALID for block by {payload.proposer_pubkey_hex[:8]} for round {payload.round_seed_hex[:8]}. Discarding block.")
         return
@@ -106,3 +116,10 @@ async def on_proposed_block(self, peer: Peer, payload: ProposedBlockPayload) -> 
             return
             
     self.logger.info(f"Block from {payload.proposer_pubkey_hex[:8]} for round {payload.round_seed_hex[:8]} PASSED all verifications.")
+    
+    # If the block passes all verification checks, create and send a vote
+    # Only vote if we meet the stake requirement
+    if self.stakes[self.pubkey_bytes] >= self.MIN_STAKE:
+        await self.send_validator_vote(payload)
+    else:
+        self.logger.info(f"Not voting on block from {payload.proposer_pubkey_hex[:8]} for round {payload.round_seed_hex[:8]} due to insufficient stake.")
