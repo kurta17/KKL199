@@ -15,33 +15,52 @@ class MerkleTree:
         left: Self | None
         right: Self | None
 
-    def __init__(self, items: list[bytes]) -> None:
+    def __init__(self, items: list[str | bytes]) -> None:
         if not items:
-            # Handle empty list case: e.g., by setting root to a predefined hash or raising error
-            # For simplicity, let's assume items will not be empty or create a default empty root
-            self.root = MerkleTree.Node(sha256(b''), None, None) 
+            self.root: MerkleTree.Node | None = None
             return
-        self.items = items # Store original items if needed for proofs, otherwise just hashes
-        
-        # If items are not hashes themselves, hash them first.
-        # Assuming 'items' are already hashes of the actual data.
-        # If 'items' are the actual data (e.g., serialized transactions), 
-        # they should be hashed before being passed to build_tree or here.
-        # For this example, we'll assume items are already hashes.
-        
-        self.root = self.build_tree(self.items, 0, len(self.items) - 1)
 
-    def build_tree(self, current_level_hashes: list[bytes], l: int, r: int) -> Node:  # noqa: E741
-        if l == r:
-            # Leaf node: hash is the item itself (assuming items are already hashes)
-            return MerkleTree.Node(current_level_hashes[l], None, None)
+        # First, make sure all items are bytes before hashing
+        byte_items = []
+        for item in items:
+            if isinstance(item, str):
+                byte_items.append(item.encode('utf-8'))
+            else:
+                byte_items.append(item)
 
-        m = (l + r) >> 1
-        left_child = self.build_tree(current_level_hashes, l, m)
-        right_child = self.build_tree(current_level_hashes, m + 1, r)
+        # Create leaf nodes by hashing each item
+        leaves = [MerkleTree.Node(sha256(item), None, None) for item in byte_items]
+
+        if not leaves: # Should not happen if items is not empty, but as a safeguard
+            self.root = None
+            return
         
-        # Non-leaf node: hash is the hash of concatenated children's hashes
-        return MerkleTree.Node(sha256(left_child.hash + right_child.hash), left_child, right_child)
+        if len(leaves) == 1:
+            self.root = leaves[0]
+            return
+
+        current_level_nodes = leaves
+        while len(current_level_nodes) > 1:
+            next_level_nodes = []
+            for i in range(0, len(current_level_nodes), 2):
+                left_child = current_level_nodes[i]
+                if i + 1 < len(current_level_nodes):
+                    right_child = current_level_nodes[i+1]
+                else:
+                    # Odd number of nodes, duplicate the last one
+                    right_child = left_child 
+                
+                parent_hash = sha256(left_child.hash + right_child.hash)
+                next_level_nodes.append(MerkleTree.Node(parent_hash, left_child, right_child))
+            current_level_nodes = next_level_nodes
+        
+        self.root = current_level_nodes[0]
+
+    def get_root(self) -> bytes | None:
+        """Returns the hash of the root node of the Merkle tree."""
+        if self.root:
+            return self.root.hash.hex()
+        return None
 
     # Example of how get_verify_data (Merkle Proof) might be structured
     # This is a more complex part and would need careful implementation
