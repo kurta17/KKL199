@@ -272,10 +272,75 @@ class ChessCommunity(Community):
                 if tx_hash in self.mempool:
                     del self.mempool[tx_hash]
     
+    def get_latest_block_hash(self) -> str:
+        """Get the hash of the latest confirmed block in the blockchain."""
+        # Open a database for confirmed blocks if needed
+        blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
+        
+        latest_hash = ""
+        with self.db_env.begin(db=blocks_db) as txn:
+            cursor = txn.cursor()
+            # Position at last key
+            if cursor.last():
+                latest_hash = cursor.key().decode('utf-8')
+            else:
+                # Genesis block placeholder hash if no blocks exist yet
+                latest_hash = hashlib.sha256("genesis".encode()).hexdigest()
+        
+        return latest_hash
+    
+    def select_propagation_peers(self, count: int = 5) -> List[Peer]:
+        """Select a subset of peers for efficient gossip protocol propagation.
+        
+        Args:
+            count: Maximum number of peers to select
+            
+        Returns:
+            List[Peer]: Selected subset of peers
+        """
+        peers = self.get_peers()
+        if not peers:
+            return []
+            
+        # If we have fewer peers than requested, return all of them
+        if len(peers) <= count:
+            return peers
+            
+        # Otherwise, select a random subset using deterministic order based on peer IDs
+        # This helps ensure more even distribution across the network
+        sorted_peers = sorted(peers, key=lambda p: p.mid)
+        peer_index = self.pos_round_number % len(sorted_peers)  # Cycle through the peers
+        
+        # Select count peers starting from peer_index, wrapping around if needed
+        selected = []
+        for i in range(count):
+            idx = (peer_index + i) % len(sorted_peers)
+            selected.append(sorted_peers[idx])
+            
+        return selected
+    
+    def store_proposed_block(self, block: ProposedBlockPayload) -> None:
+        """Store a proposed block for consensus tracking.
+        
+        Args:
+            block: The proposed block payload
+        """
+        # Create a database for proposed blocks if it doesn't exist
+        proposed_blocks_db = self.db_env.open_db(b'proposed_blocks', create=True)
+        
+        # Block ID is a combination of round and proposer
+        block_id = f"{block.round_seed_hex}:{block.proposer_pubkey_hex[:8]}".encode('utf-8')
+        
+        # Serialize and store the block
+        serialized_block = default_serializer.pack_serializable(block)
+        with self.db_env.begin(db=proposed_blocks_db, write=True) as txn:
+            txn.put(block_id, serialized_block)
+            
+        self.logger.info(f"Stored proposed block with ID {block_id.decode('utf-8')}")
+    
     async def pos_round(self) -> None:
         """Perform a round of PoS block proposal."""
         while True:
-
             self.pos_round_number += 1
             current_time = time.time()
             self.logger.info(f"Starting PoS round {self.pos_round_number} at {current_time}")
@@ -286,12 +351,12 @@ class ChessCommunity(Community):
             # check if mystake is more than MIN_STAKE
             if self.stakes[self.pubkey_bytes] < self.MIN_STAKE:
                 print(f"Stake too low ({self.stakes[self.pubkey_bytes]}), not proposing")
+                await sleep(self.POS_ROUND_INTERVAL)
                 continue
 
             # check if we are the proposer
             proposer = self.checking_proposer(seed)
             if proposer:
-
                 # Announce to the network
                 for p in self.get_peers():
                     if p.mid != self.pubkey_bytes:
@@ -352,8 +417,11 @@ class ChessCommunity(Community):
                 # Create the proposed block payload
                 round_seed_hex = seed.hex()
                 proposer_pubkey_hex = self.pubkey_bytes.hex()
+                previous_block_hash = self.get_latest_block_hash()
+                block_timestamp = int(time.time())
 
-                block_data_to_sign_str = f"{round_seed_hex}:{merkle_root}:{proposer_pubkey_hex}"
+                # Include timestamp and previous block hash in the signed data
+                block_data_to_sign_str = f"{round_seed_hex}:{merkle_root}:{proposer_pubkey_hex}:{previous_block_hash}:{block_timestamp}"
                 block_data_to_sign_bytes = block_data_to_sign_str.encode('utf-8')
                 
                 try:
@@ -363,25 +431,47 @@ class ChessCommunity(Community):
                     await sleep(self.POS_ROUND_INTERVAL)
                     continue
 
-                proposed_block = ProposedBlockPayload(
-                    round_seed_hex=round_seed_hex,
-                    transaction_hashes=transaction_hashes,
-                    merkle_root=merkle_root,
-                    proposer_pubkey_hex=proposer_pubkey_hex,
-                    signature=signature_hex
-                )
+                try:
+                    proposed_block = ProposedBlockPayload(
+                        round_seed_hex=round_seed_hex,
+                        transaction_hashes=transaction_hashes,
+                        merkle_root=merkle_root,
+                        proposer_pubkey_hex=proposer_pubkey_hex,
+                        signature=signature_hex,
+                        timestamp=block_timestamp,  # Add timestamp for block ordering
+                        previous_block_hash=previous_block_hash  # Add reference to previous block
+                    )
 
-                self.logger.info(f"Round {self.pos_round_number}: Proposing block with Merkle root {merkle_root} and {len(transaction_hashes)} transactions.")
-                for peer in self.get_peers():
-                    self.ez_send(peer, proposed_block)
+                    self.logger.info(f"Round {self.pos_round_number}: Proposing block with Merkle root {merkle_root}, timestamp {block_timestamp}, and {len(transaction_hashes)} transactions.")
+                    
+                    # Implement more efficient propagation using gossip protocol
+                    # Select a subset of peers to reduce network congestion
+                    selected_peers = self.select_propagation_peers(5)  # Select 5 peers initially
+                    if selected_peers:
+                        for peer in selected_peers:
+                            try:
+                                self.ez_send(peer, proposed_block)
+                                self.logger.debug(f"Round {self.pos_round_number}: Sent block proposal to peer {peer.mid.hex()[:8]}")
+                            except Exception as e:
+                                self.logger.warning(f"Round {self.pos_round_number}: Failed to send block to peer {peer.mid.hex()[:8]}: {e}")
+                        
+                        # Mark transactions as pending instead of deleting them
+                        pending_count = 0
+                        for tx_nonce in transaction_hashes:
+                            if tx_nonce in self.mempool:
+                                # Move to pending state rather than deleting
+                                self.pending_transactions[tx_nonce] = self.mempool[tx_nonce]
+                                pending_count += 1
+                        
+                        # Store the proposed block for consensus tracking
+                        self.store_proposed_block(proposed_block)
+                        
+                        self.logger.info(f"Round {self.pos_round_number}: Marked {pending_count} proposed transactions as pending confirmation.")
+                    else:
+                        self.logger.warning(f"Round {self.pos_round_number}: No peers available for block propagation")
+                        
+                except Exception as e:
+                    self.logger.error(f"Round {self.pos_round_number}: Error creating or sending proposed block: {e}")
                 
-                # Mark transactions as pending instead of deleting them
-                for tx_nonce in transaction_hashes:
-                    if tx_nonce in self.mempool:
-                        # Move to pending state rather than deleting
-                        self.pending_transactions[tx_nonce] = self.mempool[tx_nonce]
-                        # Keep in mempool until confirmed
-                
-                self.logger.info(f"Round {self.pos_round_number}: Marked {len(transaction_hashes)} proposed transactions as pending confirmation.")
-
-                await sleep(self.POS_ROUND_INTERVAL)
+            # Always continue the loop, don't return
+            await sleep(self.POS_ROUND_INTERVAL)
