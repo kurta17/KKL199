@@ -37,8 +37,10 @@ async def manual_send_loop(comm: ChessCommunity) -> None:
                
             elif cmd[0] == "showmempool":
                 print(f"Mempool size: {len(comm.mempool)}")
-                for idx, tx in enumerate(comm.mempool):
-                    print(f"{idx+1}. {tx.nonce}: winner={t.winner}")
+                # Iterate over the values (ChessTransaction objects) of the mempool dictionary
+                for idx, tx_object in enumerate(comm.mempool.values()):
+                    # Access attributes from the ChessTransaction object
+                    print(f"{idx+1}. Nonce: {tx_object.nonce}, Winner: {tx_object.winner}, Match ID: {tx_object.match_id}")
                    
             elif cmd[0] == "clearmempool":
                 count = len(comm.mempool)

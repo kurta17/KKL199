@@ -182,18 +182,27 @@ class ChessCommunity(Community):
             print(f"Sent move {move.id} for match {match_id}")
             await asyncio.sleep(0.1) # Simulate network delay or processing
 
+        # Prepare data for signing the transaction
+        # Use the community's Ed25519 public key
+        proposer_pubkey_hex = self.pubkey_bytes.hex() 
+        tx_data_to_sign = f"{match_id}:{winner}:{nonce}:{proposer_pubkey_hex}".encode()
+        
+        try:
+            # Use the community's Ed25519 private key for signing
+            transaction_signature_hex = self.sk.sign(tx_data_to_sign).hex()
+        except Exception as e:
+            self.logger.error(f"Error signing transaction data for match {match_id}, nonce {nonce}: {e}")
+            return # Or handle error appropriately
+
         # Create and send the final transaction
         tx = ChessTransaction(
             match_id=match_id,
             winner=winner,
             moves_hash=",".join(str(m.id) for m in moves),  # Or a proper hash of moves
             nonce=nonce,
-            proposer_pubkey_hex=self.my_peer.public_key.key_to_bin().hex() # Corrected: removed ()
+            proposer_pubkey_hex=proposer_pubkey_hex,
+            signature=transaction_signature_hex # Pass signature at instantiation
         )
-
-        # Sign the transaction
-        tx_data_to_sign = f"{match_id}:{winner}:{nonce}:{self.my_peer.public_key.key_to_bin().hex()}".encode()
-        tx.signature = self.my_peer.key.sign(tx_data_to_sign).hex()
 
         # Store and broadcast the transaction
         self.send_transaction(tx)
