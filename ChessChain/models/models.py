@@ -12,6 +12,8 @@ CHESS_TRANSACTION_MSG_ID = 1
 PROPOSED_BLOCK_MSG_ID = 2
 PROPOSER_ANNOUNCEMENT_MSG_ID = 3
 MOVE_DATA_MSG_ID = 4
+VALIDATOR_VOTE_MSG_ID = 5
+BLOCK_CONFIRMATION_MSG_ID = 6
 
 @dataclass
 class ProposedBlockPayload(DataClassPayload):
@@ -23,6 +25,8 @@ class ProposedBlockPayload(DataClassPayload):
     merkle_root: str  # Added Merkle root
     proposer_pubkey_hex: str
     signature: str
+    timestamp: int = 0  # Unix timestamp for block ordering
+    previous_block_hash: str = ""  # Hash of the previous block
 
 @dataclass
 class ProposerAnnouncement(DataClassPayload):
@@ -180,3 +184,28 @@ class ChessTransaction(DataClassPayload):
         except Exception as e:
             print(f"Error verifying transaction {self.nonce}: {e}")
             return False
+
+@dataclass
+class ValidatorVote(DataClassPayload):
+    """Payload for validators voting on proposed blocks."""
+    msg_id = VALIDATOR_VOTE_MSG_ID
+
+    round_seed_hex: str  # Round this vote is for
+    block_merkle_root: str  # Merkle root of the voted block
+    proposer_pubkey_hex: str  # Proposer of the block being voted on
+    validator_pubkey_hex: str  # Validator's public key
+    vote: bool  # True for approval, False for rejection
+    signature: str  # Validator signature on vote data
+
+@dataclass
+class BlockConfirmation(DataClassPayload):
+    """Payload for block finalization confirmation once quorum is reached."""
+    msg_id = BLOCK_CONFIRMATION_MSG_ID
+
+    round_seed_hex: str  # Round this confirmation is for
+    block_merkle_root: str  # Merkle root of the confirmed block
+    proposer_pubkey_hex: str  # Proposer of the confirmed block
+    timestamp: int  # Block timestamp
+    signatures_count: int  # Number of validator signatures (quorum count)
+    confirmer_pubkey_hex: str  # Public key of peer who confirmed quorum
+    signature: str  # Confirmer's signature
