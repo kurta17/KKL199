@@ -36,6 +36,11 @@ class ChessCommunity(Community):
         
         self.add_message_handler(ChessTransaction, on_transaction)
         self.add_message_handler(MoveData, on_move)
+        
+        # Add handlers for the validation messages
+        from models.models import ValidatorVote, BlockConfirmation
+        self.add_message_handler(ValidatorVote, self.on_validator_vote)
+        self.add_message_handler(BlockConfirmation, self.on_block_confirmation)
        
         # Set up databases
         self.db_env = lmdb.open('chess_db', max_dbs=3, map_size=10**8)
@@ -51,6 +56,15 @@ class ChessCommunity(Community):
         self.pos_round_number = 0
         self.current_round_seed = None
         self.pending_transactions: Dict[str, ChessTransaction] = {}  # Transactions in proposed blocks awaiting confirmation
+        
+        # Consensus tracking dictionaries
+        self.round_proposers: Dict[str, str] = {}  # Maps round seed to proposer pubkey
+        self.block_votes: Dict[str, Dict[str, bool]] = {}  # Maps block_id to {validator_pubkey: vote}
+        self.block_confirmations: Dict[str, BlockConfirmation] = {}  # Maps block_id to confirmation
+        self.processed_blocks: Set[str] = set()  # Set of already processed block IDs
+        
+        # Consensus parameters
+        self.QUORUM_RATIO = 0.67  # 2/3 majority for consensus
  
         # Load existing transactions and stakes
         with self.db_env.begin(db=self.tx_db) as tx:
@@ -472,6 +486,304 @@ class ChessCommunity(Community):
                         
                 except Exception as e:
                     self.logger.error(f"Round {self.pos_round_number}: Error creating or sending proposed block: {e}")
-                
+            else:
+                self.logger.info(f"Waiting to be selected as validator for round {self.pos_round_number} with seed {seed.hex()[:8]}")   
+                # If not selected, just wait for the next round
+
+
+                # if we are validator, we will be notified by the network
+                # here goes the logic of validator
             # Always continue the loop, don't return
             await sleep(self.POS_ROUND_INTERVAL)
+    
+    async def send_validator_vote(self, block: ProposedBlockPayload) -> None:
+        """Send a validator vote for a proposed block.
+        
+        Args:
+            block: The proposed block to vote on
+        """
+        from models.models import ValidatorVote
+        
+        # Create a unique block identifier
+        block_id = f"{block.round_seed_hex}:{block.merkle_root}"
+        
+        # Check if we've already voted on this block
+        if block_id in self.processed_blocks:
+            self.logger.info(f"Already processed block {block_id[:16]}. Skipping vote.")
+            return
+        
+        # Create vote data to sign (include all relevant block data for security)
+        vote_data = f"{block.round_seed_hex}:{block.merkle_root}:{block.proposer_pubkey_hex}:{self.pubkey_bytes.hex()}:true"
+        vote_signature = self.sk.sign(vote_data.encode('utf-8')).hex()
+        
+        # Create the vote payload
+        vote = ValidatorVote(
+            round_seed_hex=block.round_seed_hex,
+            block_merkle_root=block.merkle_root,
+            proposer_pubkey_hex=block.proposer_pubkey_hex,
+            validator_pubkey_hex=self.pubkey_bytes.hex(),
+            vote=True,  # True means approval
+            signature=vote_signature
+        )
+        
+        # Initialize vote tracking for this block if needed
+        if block_id not in self.block_votes:
+            self.block_votes[block_id] = {}
+        
+        # Register our own vote
+        self.block_votes[block_id][self.pubkey_bytes.hex()] = True
+        
+        # Send the vote to peers using efficient gossip protocol
+        selected_peers = self.select_propagation_peers(3)  # Use fewer peers for votes
+        if selected_peers:
+            for peer in selected_peers:
+                try:
+                    self.ez_send(peer, vote)
+                    self.logger.debug(f"Sent vote for block {block_id[:16]} to {peer.mid.hex()[:8]}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to send vote to {peer.mid.hex()[:8]}: {e}")
+        
+        # Mark this block as processed
+        self.processed_blocks.add(block_id)
+        
+        # Check if we have enough votes for consensus
+        await self.check_consensus(block)
+    
+    async def on_validator_vote(self, peer: Peer, payload) -> None:
+        """Handle incoming validator votes."""
+        from models.models import ValidatorVote
+        
+        # Type checking since we're manually receiving this as a parameter
+        if not isinstance(payload, ValidatorVote):
+            self.logger.error(f"Received incorrect payload type for validator vote: {type(payload)}")
+            return
+        
+        block_id = f"{payload.round_seed_hex}:{payload.block_merkle_root}"
+        self.logger.info(f"Received validator vote for block {block_id[:16]} from {payload.validator_pubkey_hex[:8]}")
+        
+        # Verify the vote signature
+        try:
+            validator_pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(payload.validator_pubkey_hex))
+            vote_data = f"{payload.round_seed_hex}:{payload.block_merkle_root}:{payload.proposer_pubkey_hex}:{payload.validator_pubkey_hex}:{'true' if payload.vote else 'false'}"
+            validator_pubkey.verify(bytes.fromhex(payload.signature), vote_data.encode('utf-8'))
+        except Exception as e:
+            self.logger.warning(f"Invalid vote signature from {payload.validator_pubkey_hex[:8]}: {e}")
+            return
+        
+        # Initialize vote tracking for this block if needed
+        if block_id not in self.block_votes:
+            self.block_votes[block_id] = {}
+        
+        # Record this vote
+        self.block_votes[block_id][payload.validator_pubkey_hex] = payload.vote
+        
+        # Forward this vote to other peers for gossip propagation
+        if block_id not in self.processed_blocks:
+            selected_peers = self.select_propagation_peers(2)  # Use fewer peers for forwarding votes
+            if selected_peers:
+                for forward_peer in selected_peers:
+                    if forward_peer.mid.hex() != peer.mid.hex():  # Don't send back to sender
+                        try:
+                            self.ez_send(forward_peer, payload)
+                            self.logger.debug(f"Forwarded vote for block {block_id[:16]} to {forward_peer.mid.hex()[:8]}")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to forward vote to {forward_peer.mid.hex()[:8]}: {e}")
+        
+        # If we're the block proposer, check for consensus
+        if payload.proposer_pubkey_hex == self.pubkey_bytes.hex():
+            # Get the block from our stored proposals
+            proposed_blocks_db = self.db_env.open_db(b'proposed_blocks', create=True)
+            proposed_block = None
+            
+            try:
+                with self.db_env.begin(db=proposed_blocks_db) as txn:
+                    for key, data in txn.cursor():
+                        key_str = key.decode('utf-8')
+                        if key_str.startswith(f"{payload.round_seed_hex}:"):
+                            proposed_block_data, _ = default_serializer.unpack_serializable(ProposedBlockPayload, data)
+                            if proposed_block_data.merkle_root == payload.block_merkle_root:
+                                proposed_block = proposed_block_data
+                                break
+                
+                if proposed_block:
+                    await self.check_consensus(proposed_block)
+                else:
+                    self.logger.warning(f"Received vote for unknown block {block_id[:16]}")
+            except Exception as e:
+                self.logger.error(f"Error retrieving proposed block for vote check: {e}")
+    
+    async def check_consensus(self, block: ProposedBlockPayload) -> None:
+        """Check if consensus has been reached for a block.
+        
+        Args:
+            block: The proposed block to check consensus for
+        """
+        from models.models import BlockConfirmation
+        
+        block_id = f"{block.round_seed_hex}:{block.merkle_root}"
+        
+        # Skip if we've already confirmed this block
+        if block_id in self.block_confirmations:
+            return
+            
+        # Get votes for this block
+        if block_id not in self.block_votes:
+            return
+            
+        votes = self.block_votes[block_id]
+        
+        # Count positive votes (weighted by stake)
+        total_stake = 0
+        approving_stake = 0
+        
+        for voter_pubkey, vote in votes.items():
+            try:
+                voter_stake = self.stakes.get(bytes.fromhex(voter_pubkey), 0)
+                total_stake += voter_stake
+                if vote:  # True means approval
+                    approving_stake += voter_stake
+            except Exception as e:
+                self.logger.warning(f"Error counting stake for voter {voter_pubkey[:8]}: {e}")
+        
+        # Check if quorum threshold is met
+        if total_stake > 0 and approving_stake / total_stake >= self.QUORUM_RATIO:
+            self.logger.info(f"Consensus reached for block {block_id[:16]} with {approving_stake}/{total_stake} stake ({approving_stake/total_stake:.2f})")
+            
+            # Create block confirmation
+            confirmation_data = f"{block.round_seed_hex}:{block.merkle_root}:{block.proposer_pubkey_hex}:{block.timestamp}:{len(votes)}"
+            confirmation_signature = self.sk.sign(confirmation_data.encode('utf-8')).hex()
+            
+            confirmation = BlockConfirmation(
+                round_seed_hex=block.round_seed_hex,
+                block_merkle_root=block.merkle_root,
+                proposer_pubkey_hex=block.proposer_pubkey_hex,
+                timestamp=block.timestamp,
+                signatures_count=len(votes),
+                confirmer_pubkey_hex=self.pubkey_bytes.hex(),
+                signature=confirmation_signature
+            )
+            
+            # Store the confirmation
+            self.block_confirmations[block_id] = confirmation
+            
+            # Broadcast confirmation to network
+            for peer in self.get_peers():
+                try:
+                    self.ez_send(peer, confirmation)
+                except Exception as e:
+                    self.logger.warning(f"Failed to send confirmation to {peer.mid.hex()[:8]}: {e}")
+            
+            # Add the confirmed block to the blockchain
+            await self.add_confirmed_block(block)
+        else:
+            self.logger.info(f"Not enough votes for block {block_id[:16]} yet: {approving_stake}/{total_stake} stake ({approving_stake/total_stake:.2f} vs required {self.QUORUM_RATIO})")
+    
+    async def on_block_confirmation(self, peer: Peer, payload) -> None:
+        """Handle incoming block confirmations."""
+        from models.models import BlockConfirmation
+        
+        # Type checking
+        if not isinstance(payload, BlockConfirmation):
+            self.logger.error(f"Received incorrect payload type for block confirmation: {type(payload)}")
+            return
+            
+        block_id = f"{payload.round_seed_hex}:{payload.block_merkle_root}"
+        self.logger.info(f"Received block confirmation for {block_id[:16]} from {payload.confirmer_pubkey_hex[:8]} with {payload.signatures_count} signatures")
+        
+        # Verify the confirmation signature
+        try:
+            confirmer_pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(payload.confirmer_pubkey_hex))
+            confirmation_data = f"{payload.round_seed_hex}:{payload.block_merkle_root}:{payload.proposer_pubkey_hex}:{payload.timestamp}:{payload.signatures_count}"
+            confirmer_pubkey.verify(bytes.fromhex(payload.signature), confirmation_data.encode('utf-8'))
+        except Exception as e:
+            self.logger.warning(f"Invalid confirmation signature from {payload.confirmer_pubkey_hex[:8]}: {e}")
+            return
+        
+        # Store this confirmation if we haven't already
+        if block_id not in self.block_confirmations:
+            self.block_confirmations[block_id] = payload
+            
+            # Forward to more peers for gossip propagation
+            selected_peers = self.select_propagation_peers(3)
+            if selected_peers:
+                for forward_peer in selected_peers:
+                    if forward_peer.mid.hex() != peer.mid.hex():  # Don't send back to sender
+                        try:
+                            self.ez_send(forward_peer, payload)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to forward confirmation to {forward_peer.mid.hex()[:8]}: {e}")
+            
+            # Find the proposed block data and add to blockchain
+            proposed_blocks_db = self.db_env.open_db(b'proposed_blocks', create=True)
+            try:
+                with self.db_env.begin(db=proposed_blocks_db) as txn:
+                    for key, data in txn.cursor():
+                        key_str = key.decode('utf-8')
+                        if key_str.startswith(f"{payload.round_seed_hex}:"):
+                            proposed_block, _ = default_serializer.unpack_serializable(ProposedBlockPayload, data)
+                            if proposed_block.merkle_root == payload.block_merkle_root:
+                                await self.add_confirmed_block(proposed_block)
+                                return
+                self.logger.warning(f"Received confirmation for unknown block {block_id[:16]}")
+            except Exception as e:
+                self.logger.error(f"Error retrieving proposed block for confirmation: {e}")
+    
+    async def add_confirmed_block(self, block: ProposedBlockPayload) -> None:
+        """Add a confirmed block to the blockchain and update state accordingly.
+        
+        Args:
+            block: The confirmed block to add to the chain
+        """
+        # Create a database for the confirmed blockchain if it doesn't exist
+        blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
+        
+        # Calculate the block hash for the key
+        block_data_str = f"{block.round_seed_hex}:{block.merkle_root}:{block.proposer_pubkey_hex}:{block.previous_block_hash}:{block.timestamp}"
+        block_hash = hashlib.sha256(block_data_str.encode('utf-8')).hexdigest()
+        
+        try:
+            # Serialize and store the confirmed block
+            serialized_block = default_serializer.pack_serializable(block)
+            with self.db_env.begin(db=blocks_db, write=True) as txn:
+                txn.put(block_hash.encode('utf-8'), serialized_block)
+                
+            self.logger.info(f"Added confirmed block {block_hash[:16]} to blockchain with {len(block.transaction_hashes)} transactions")
+            
+            # Update transaction status, remove from mempool and pending
+            self.mark_transactions_as_processed(block.transaction_hashes)
+            
+            # Reward the proposer
+            await self.reward_proposer(block.proposer_pubkey_hex)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to add confirmed block to blockchain: {e}")
+    
+    async def reward_proposer(self, proposer_pubkey_hex: str) -> None:
+        """Reward the proposer of a confirmed block with additional stake.
+        
+        Args:
+            proposer_pubkey_hex: The hex-encoded public key of the proposer
+        """
+        try:
+            # Convert hex pubkey to bytes
+            proposer_pubkey_bytes = bytes.fromhex(proposer_pubkey_hex)
+            
+            # Award a small stake reward (adjust based on economic model)
+            reward_amount = 2
+            
+            # Update stake in memory and database
+            current_stake = self.stakes.get(proposer_pubkey_bytes, 0)
+            new_stake = current_stake + reward_amount
+            
+            with self.db_env.begin(db=self.stake_db, write=True) as txn:
+                txn.put(proposer_pubkey_bytes, str(new_stake).encode('utf-8'))
+                
+            self.stakes[proposer_pubkey_bytes] = new_stake
+            
+            if proposer_pubkey_hex == self.pubkey_bytes.hex():
+                self.logger.info(f"Received block proposal reward of {reward_amount} stake. New total: {new_stake}")
+            else:
+                self.logger.info(f"Awarded block proposal reward of {reward_amount} stake to {proposer_pubkey_hex[:8]}. Their new total: {new_stake}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to reward proposer {proposer_pubkey_hex[:8]}: {e}")
