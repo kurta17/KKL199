@@ -85,8 +85,51 @@ class ChessCommunity(Community):
         # Assign initial stake to this peer if it doesn't have any
         if self.pubkey_bytes not in self.stakes:
             self.stake_tokens(self.INITIAL_STAKE)
+        
+        self.initialize_blockchain()
 
-    
+    def initialize_blockchain(self) -> None:
+        """Initialize the blockchain with a genesis block if none exists."""
+        blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
+        
+        # Check if we already have blocks
+        with self.db_env.begin(db=blocks_db) as txn:
+            cursor = txn.cursor()
+            if cursor.first():  # If there's at least one block
+                self.logger.info("Blockchain already initialized with existing blocks")
+                return
+        
+        # Create genesis block with special parameters
+        genesis_seed = "0000000000000000000000000000000000000000000000000000000000000000"
+        genesis_time = int(time.time())
+        genesis_merkle_root = hashlib.sha256("genesis_root".encode()).hexdigest()
+        
+        # Sign the genesis block with our key
+        genesis_data = f"{genesis_seed}:{genesis_merkle_root}:{self.pubkey_bytes.hex()}:genesis:{genesis_time}"
+        genesis_signature = self.sk.sign(genesis_data.encode('utf-8')).hex()
+        
+        # Create the genesis block payload
+        genesis_block = ProposedBlockPayload(
+            round_seed_hex=genesis_seed,
+            transaction_hashes=[],  # No transactions in genesis
+            merkle_root=genesis_merkle_root,
+            proposer_pubkey_hex=self.pubkey_bytes.hex(),
+            signature=genesis_signature,
+            timestamp=genesis_time,
+            previous_block_hash="genesis"  # Special marker for genesis block
+        )
+        
+        # Calculate block hash
+        genesis_block_hash = hashlib.sha256(genesis_data.encode('utf-8')).hexdigest()
+        
+        # Store the genesis block
+        with self.db_env.begin(db=blocks_db, write=True) as txn:
+            serialized_genesis = default_serializer.pack_serializable(genesis_block)
+            txn.put(genesis_block_hash.encode('utf-8'), serialized_genesis)
+        
+        self.logger.info(f"Initialized blockchain with genesis block {genesis_block_hash[:16]}")
+
+
     def stake_tokens(self, amount: int) -> None:
         """Stake tokens in the system."""
         pid = self.pubkey_bytes
