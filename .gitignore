@@ -1,2 +1,5 @@
 transactions_db
 chess_db
+
+*.pyc
+__pycache__/

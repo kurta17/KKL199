@@ -1,21 +1,21 @@
 import base64
 import hashlib
-import json
 import time
 import uuid
 from asyncio import create_task, sleep
 from typing import Dict, List, Set, Tuple
- 
+
+import asyncio
 import lmdb
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
 from ipv8.community import Community, CommunitySettings
 from ipv8.types import Peer
-from ipv8.lazy_community import lazy_wrapper
-
+from ipv8.messaging.serialization import default_serializer
 
 from models.models import ChessTransaction, MoveData, ProposedBlockPayload, ProposerAnnouncement
 from utils.utils import lottery_selection
+from utils.merkle import MerkleTree
 from .messages import on_transaction, on_proposed_block, on_proposer_announcement, on_move
 
 
@@ -45,9 +45,11 @@ class ChessCommunity(Community):
  
         # Initialize state
         self.transactions: Set[str] = set()
-        self.mempool: List[ChessTransaction] = []
+        self.mempool: Dict[str, ChessTransaction] = {}
         self.sent: Set[Tuple[bytes, str]] = set()
         self.stakes: Dict[bytes, int] = {}
+        self.pos_round_number = 0
+        self.current_round_seed = None
  
         # Load existing transactions and stakes
         with self.db_env.begin(db=self.tx_db) as tx:
@@ -83,6 +85,11 @@ class ChessCommunity(Community):
         """Calculate the total stake in the system."""
         return sum(self.stakes.values())
 
+    def is_transaction_in_db(self, nonce: str) -> bool:
+        """Check if a transaction with the given nonce exists in the LMDB database."""
+        with self.db_env.begin(db=self.tx_db, write=False) as txn:
+            return txn.get(nonce.encode('utf-8')) is not None
+
     def checking_proposer(self, seed: bytes) -> bytes:
         """Peer is checking if it is the proposer for a given seed."""
         return lottery_selection(seed_plus_id=seed + self.pubkey_bytes, my_stake=self.stakes[self.pubkey_bytes], total_stake=self.total_stake())
@@ -101,37 +108,39 @@ class ChessCommunity(Community):
     def get_stored_transactions(self) -> List[ChessTransaction]:
         """Get all transactions stored in the database."""
         out = []
-        required_keys = {"match_id", "winner", "player1_pubkey", "player1_signature",
-                        "player2_pubkey", "player2_signature", "nonce", "tx_pubkey", "signature"}
-        with self.db_env.begin(db=self.tx_db) as tx:
-            for key, raw in tx.cursor():
+        with self.db_env.begin(db=self.tx_db) as txn:
+            for key, raw in txn.cursor():
                 try:
-                    data = json.loads(raw.decode())
-                    if not all(key in data for key in required_keys):
-                        print(f"Skipping invalid transaction {key.decode()}: missing required keys")
-                        continue
-                    out.append(ChessTransaction.from_dict(data))
+                    deserialized_tx, _ = default_serializer.unpack_serializable(ChessTransaction, raw)
+                    out.append(deserialized_tx)
                 except Exception as e:
-                    print(f"Error loading transaction {key.decode()}: {e}")
+                    key_repr = key.hex() if isinstance(key, bytes) else str(key)
+                    print(f"Error loading transaction {key_repr}: {e}")
         return out
  
     def get_stored_moves(self, match_id: str) -> List[MoveData]:
         """Get all moves for a given match_id from the database."""
         out = []
-        with self.db_env.begin(db=self.moves_db) as tx:
-            cursor = tx.cursor()
+        with self.db_env.begin(db=self.moves_db) as txn:
+            cursor = txn.cursor()
             for key, raw in cursor:
-                if key.decode().startswith(f"{match_id}:"):
-                    try:
-                        out.append(MoveData.from_dict(json.loads(raw.decode())))
-                    except Exception as e:
-                        print(f"Error loading move {key.decode()}: {e}")
+                try:
+                    key_str = key.decode()
+                    if key_str.startswith(f"{match_id}:"):
+                        deserialized_move, _ = default_serializer.unpack_serializable(MoveData, raw)
+                        out.append(deserialized_move)
+                except UnicodeDecodeError:
+                    print(f"Skipping non-UTF-8 key in moves_db: {key.hex()}")
+                    continue
+                except Exception as e:
+                    key_repr = key.hex() if isinstance(key, bytes) else str(key)
+                    print(f"Error loading move {key_repr}: {e}")
         return sorted(out, key=lambda x: x.id)
  
     async def periodic_broadcast(self) -> None:
         """Periodically broadcast transactions to peers."""
         while True:
-            for tx in list(self.mempool):
+            for tx in list(self.mempool.values()):
                 for p in self.get_peers():
                     if p.mid != self.pubkey_bytes and (p.mid, tx.nonce) not in self.sent:
                         self.ez_send(p, tx)
@@ -147,139 +156,162 @@ class ChessCommunity(Community):
             print(f"Transaction {tx.nonce} failed verification")
             return
         with self.db_env.begin(db=self.tx_db, write=True) as wr:
-            wr.put(tx.nonce.encode(), json.dumps(tx.to_dict()).encode())
+            serialized_tx = default_serializer.pack_serializable(tx)
+            wr.put(tx.nonce.encode(), serialized_tx)
         self.transactions.add(tx.nonce)
-        self.mempool.append(tx)
+        self.mempool[tx.nonce] = tx
         for p in self.get_peers():
             if p.mid != self.pubkey_bytes and (p.mid, tx.nonce) not in self.sent:
                 self.ez_send(p, tx)
                 self.sent.add((p.mid, tx.nonce))
         print(f"Sent transaction {tx.nonce}")
  
-    async def send_moves(self, match_id: str, moves: List[dict], p1_sk: Ed25519PrivateKey,
-                        p2_sk: Ed25519PrivateKey, p1_pk: Ed25519PublicKey,
-                        p2_pk: Ed25519PublicKey) -> ChessTransaction:
-        """Send moves one by one with a 4-second delay and return the final transaction."""
-        for move_def in moves:
-            move_id = move_def["id"]
-            player = move_def["player"]
-            move_value = move_def["move_str"]
-            move_data_to_sign = f"{move_id}:{player}:{move_value}".encode()
-            sk = p1_sk if player == "player1" else p2_sk
-            move_signature = base64.b64encode(sk.sign(move_data_to_sign)).decode()
-           
-            move_data = MoveData(
-                id=move_id,
-                player=player,
-                move=move_value,
-                signature=move_signature
-            )
-           
-            # Store move locally
-            key = f"{match_id}:{move_id}".encode()
-            with self.db_env.begin(db=self.moves_db, write=True) as tx:
-                tx.put(key, json.dumps(move_data.to_dict()).encode())
-           
-            # Send move to peers
-            for p in self.get_peers():
-                if p.mid != self.pubkey_bytes:
-                    self.ez_send(p, move_data)
-            print(f"Sent move {move_id} for match {match_id}")
-           
-            await sleep(4)  # 4-second delay
- 
-        # Create final transaction
-        winner = moves[-1]["player"]
-        outcome = f"{match_id}:{winner}".encode()
-        p1_sig = base64.b64encode(p1_sk.sign(outcome)).decode()
-        p2_sig = base64.b64encode(p2_sk.sign(outcome)).decode()
-       
-        p1_pk_str = base64.b64encode(
-            p1_pk.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
-        ).decode()
-        p2_pk_str = base64.b64encode(
-            p2_pk.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
-        ).decode()
-       
-        nonce = match_id
-        tx_data = f"{match_id}:{winner}:{nonce}".encode()
-        tx_sig = base64.b64encode(self.sk.sign(tx_data)).decode()
-        tx_pk_str = base64.b64encode(
-            self.pk.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
-        ).decode()
-        # Send_transaction
+    async def send_moves(self, match_id: str, winner: str, moves: List[MoveData], nonce: str) -> None:
+        """Send all moves for a completed match and the final transaction."""
+        # Store and broadcast each move
+        for move in moves:
+            packed_move = default_serializer.pack_serializable(move)
+            # Store move
+            with self.db_env.begin(write=True) as txn:
+                moves_db = self.db_env.open_db(b'moves', txn=txn, create=True)
+                # Use a composite key: match_id + move_id
+                move_key = f"{match_id}_{move.id}".encode('utf-8')
+                txn.put(move_key, packed_move, db=moves_db)
+            # Broadcast move (optional, depending on your P2P logic for moves)
+            # self.ez_send(self.get_random_peer(), move) # Example, adjust as needed
+            print(f"Sent move {move.id} for match {match_id}")
+            await asyncio.sleep(0.1) # Simulate network delay or processing
+
+        # Create and send the final transaction
         tx = ChessTransaction(
             match_id=match_id,
             winner=winner,
-            player1_pubkey=p1_pk_str,
-            player1_signature=p1_sig,
-            player2_pubkey=p2_pk_str,
-            player2_signature=p2_sig,
+            moves_hash=",".join(str(m.id) for m in moves),  # Or a proper hash of moves
             nonce=nonce,
-            tx_pubkey=tx_pk_str,
-            signature=tx_sig
+            proposer_pubkey_hex=self.my_peer.public_key.key_to_bin().hex() # Corrected: removed ()
         )
-        self.send_transaction(tx)
 
+        # Sign the transaction
+        tx_data_to_sign = f"{match_id}:{winner}:{nonce}:{self.my_peer.public_key.key_to_bin().hex()}".encode()
+        tx.signature = self.my_peer.key.sign(tx_data_to_sign).hex()
+
+        # Store and broadcast the transaction
+        self.send_transaction(tx)
  
     def generate_fake_match(self) -> None:
         """Generate a fake match and start sending moves."""
-        mid = str(uuid.uuid4())
-       
-        # Simulate two players
-        p1_sk = Ed25519PrivateKey.generate()
-        p1_pk = p1_sk.public_key()
-        p2_sk = Ed25519PrivateKey.generate()
-        p2_pk = p2_sk.public_key()
- 
+        match_id = str(uuid.uuid4())
+        winner = "player1" # Example winner
+        nonce = str(uuid.uuid4()) # Unique nonce for the transaction
+
         # Define the sequence of moves
         raw_move_definitions = [
-            {"id": 1, "player": "player1", "move_str": "e4"},
-            {"id": 2, "player": "player2", "move_str": "e5"},
-            {"id": 3, "player": "player1", "move_str": "Nf3"}
+            {"id": 1, "player": "player1_pubkey_hex", "move": "e4", "timestamp": time.time()},
+            {"id": 2, "player": "player2_pubkey_hex", "move": "e5", "timestamp": time.time() + 1},
+            {"id": 3, "player": "player1_pubkey_hex", "move": "Nf3", "timestamp": time.time() + 2}
         ]
+
+        moves_list: List[MoveData] = []
+        for move_def in raw_move_definitions:
+            move_signature_placeholder = "fake_signature_" + str(move_def["id"]) 
+            
+            move = MoveData(
+                match_id=match_id,
+                id=move_def["id"],
+                player=move_def["player"], # Changed from player_id to player
+                move=move_def["move"], # Changed from move_str to move
+                timestamp=move_def["timestamp"],
+                signature=move_signature_placeholder 
+            )
+            moves_list.append(move)
        
-        # Start sending moves and transaction
-        create_task(self.send_moves(mid, raw_move_definitions, p1_sk, p2_sk, p1_pk, p2_pk))
+        self.logger.info(f"Generating fake match {match_id} with {len(moves_list)} moves. Winner: {winner}, Nonce: {nonce}")
+        create_task(self.send_moves(match_id, winner, moves_list, nonce))
  
     async def pos_round(self) -> None:
-        """Run a proof of stake consensus round."""
-        while True:
+        """Perform a round of PoS block proposal."""
+        self.pos_round_number += 1
+        current_time = time.time()
+        self.logger.info(f"Starting PoS round {self.pos_round_number} at {current_time}")
+
+        # Fetch transactions from storage (e.g., LMDB)
+        stored_transactions = self.get_stored_transactions()
+        transactions_to_propose: List[ChessTransaction] = []
+        processed_nonces = set()
+
+        for tx in stored_transactions:
+            if tx.nonce not in processed_nonces:
+                transactions_to_propose.append(tx)
+                processed_nonces.add(tx.nonce)
+        
+        self.logger.info(f"Round {self.pos_round_number}: Fetched {len(transactions_to_propose)} transactions from DB.")
+
+        # Add transactions from mempool that are not already included from DB
+        mempool_tx_count = 0
+        for nonce, tx_from_mempool in list(self.mempool.items()): 
+            if nonce not in processed_nonces:
+                if isinstance(tx_from_mempool, ChessTransaction):
+                    transactions_to_propose.append(tx_from_mempool)
+                    processed_nonces.add(nonce) 
+                    mempool_tx_count += 1
+                else:
+                    self.logger.warning(f"Mempool item with nonce {nonce} is not a ChessTransaction object, but {type(tx_from_mempool)}. Skipping.")
+        
+        if mempool_tx_count > 0:
+            self.logger.info(f"Round {self.pos_round_number}: Added {mempool_tx_count} unique transactions from mempool.")
+        
+        self.logger.info(f"Round {self.pos_round_number}: Total transactions to propose: {len(transactions_to_propose)}")
+
+        if not transactions_to_propose:
+            self.logger.info(f"Round {self.pos_round_number}: No transactions in mempool or DB to propose a block for.")
             await sleep(self.POS_ROUND_INTERVAL)
-            seed = hashlib.sha256(str(time.time()).encode()).digest()
+            return
 
-            # check if mystake is more than MIN_STAKE
-            if self.stakes[self.pubkey_bytes] < self.MIN_STAKE:
-                print(f"Stake too low ({self.stakes[self.pubkey_bytes]}), not proposing")
-                continue
-            # check if we are the proposer
-            proposer = self.checking_proposer(seed)
+        # Construct Merkle tree from transaction nonces
+        transaction_hashes = [tx.nonce for tx in transactions_to_propose]
+        if not transaction_hashes:
+            self.logger.warning(f"Round {self.pos_round_number}: Transaction hashes list is empty despite having transactions. This should not happen.")
+            await sleep(self.POS_ROUND_INTERVAL)
+            return
 
-            if proposer:
-                self.logger.info(f"Proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
-                # Announce to the network
-                for p in self.get_peers():
-                    if p.mid != self.pubkey_bytes:
-                        self.ez_send(p, ProposerAnnouncement(seed.hex(), self.pubkey_bytes.hex()))
-                self.logger.info(f"Announced proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
-                # Create a block payload
-                block_payload = ProposedBlockPayload(seed.hex(), self.pubkey_bytes.hex(), self.get_stored_transactions())
-                #### creation of block payload logic goes here
-                # 
-                #
-                self.logger.info(f"Created block payload for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
-                # Send the block payload to the network
-                for p in self.get_peers():
-                    if p.mid != self.pubkey_bytes:
-                        self.ez_send(p, block_payload)
-                self.sent.add((self.pubkey_bytes, seed.hex()))
-                self.logger.info(f"Sent block payload for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
-            else:
-                self.logger.info(f"Not proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
-                await sleep(3) # wait for a while before get the block to validate
-                #
-                #
-                # listen for blocks from other proposers
-                # and validate them
-                # This would involve implementing a block validation method
-                # and storing valid blocks in a separate database
+        merkle_tree = MerkleTree(transaction_hashes)
+        merkle_root = merkle_tree.get_root()
+        if not merkle_root:
+            self.logger.error(f"Round {self.pos_round_number}: Failed to generate Merkle root.")
+            await sleep(self.POS_ROUND_INTERVAL)
+            return
+
+        self.logger.info(f"Round {self.pos_round_number}: Merkle root for {len(transaction_hashes)} transactions: {merkle_root}")
+
+        # Create the proposed block payload
+        round_seed_hex = self.current_round_seed.hex() if self.current_round_seed else "0" * 64
+        proposer_pubkey_hex = self.pubkey_bytes.hex()
+
+        block_data_to_sign_str = f"{round_seed_hex}:{merkle_root}:{proposer_pubkey_hex}"
+        block_data_to_sign_bytes = block_data_to_sign_str.encode('utf-8')
+        
+        try:
+            signature_hex = self.sk.sign(block_data_to_sign_bytes).hex()
+        except Exception as e:
+            self.logger.error(f"Round {self.pos_round_number}: Error signing block data: {e}")
+            await sleep(self.POS_ROUND_INTERVAL)
+            return
+
+        proposed_block = ProposedBlockPayload(
+            round_seed_hex=round_seed_hex,
+            transaction_hashes=transaction_hashes,
+            merkle_root=merkle_root,
+            proposer_pubkey_hex=proposer_pubkey_hex,
+            signature=signature_hex
+        )
+
+        self.logger.info(f"Round {self.pos_round_number}: Proposing block with Merkle root {merkle_root} and {len(transaction_hashes)} transactions.")
+        for peer in self.get_peers():
+            self.ez_send(peer, proposed_block)
+        
+        for tx_nonce in transaction_hashes:
+            if tx_nonce in self.mempool:
+                del self.mempool[tx_nonce]
+        self.logger.info(f"Round {self.pos_round_number}: Cleared {len(transaction_hashes)} proposed transactions from mempool.")
+
+        await sleep(self.POS_ROUND_INTERVAL)
