@@ -8,6 +8,7 @@ from models.models import ChessTransaction, ProposedBlockPayload, ProposerAnnoun
 from cryptography.exceptions import InvalidSignature # Added
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey # Added
 from utils.merkle import MerkleTree # Added for Merkle root verification
+import hashlib # Added for new seed generation
 
 
 @lazy_wrapper(MoveData)
@@ -73,6 +74,19 @@ async def on_proposed_block(self, peer: Peer, payload: ProposedBlockPayload) -> 
     """Handles an incoming proposed block with full validation."""
     self.logger.info(f"Received ProposedBlockPayload for round {payload.round_seed_hex[:8]} from peer {peer.mid.hex()[:8] if peer else 'Unknown Peer'} (claimed proposer: {payload.proposer_pubkey_hex[:8]})")
 
+    # Basic validation: Check if the block's round seed matches the community's current round seed.
+    # This prevents processing blocks for rounds that are not the current one.
+    if not self.community.current_round_seed or payload.round_seed_hex != self.community.current_round_seed.hex():
+        self.logger.warning(f"Block from {payload.proposer_pubkey_hex[:8]} for round {payload.round_seed_hex[:8]} does not match current community seed {self.community.current_round_seed.hex() if self.community.current_round_seed else 'None'}. Discarding.")
+        return
+
+    # Validate proposer based on the block's round seed
+    expected_proposer_id = self.community.checking_proposer(bytes.fromhex(payload.round_seed_hex))
+    if bytes.fromhex(payload.proposer_pubkey_hex) != expected_proposer_id:
+        self.logger.warning(f"Block proposer {payload.proposer_pubkey_hex[:8]} is not the expected proposer {expected_proposer_id.hex()[:8]} for round seed {payload.round_seed_hex[:8]}. Discarding.")
+        return
+    self.logger.info(f"Block proposer {payload.proposer_pubkey_hex[:8]} IS the expected proposer for round seed {payload.round_seed_hex[:8]}.")
+
     try:
         proposer_public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(payload.proposer_pubkey_hex))
         block_data_to_verify_str = f"{payload.round_seed_hex}:{payload.merkle_root}:{payload.proposer_pubkey_hex}"
@@ -94,15 +108,46 @@ async def on_proposed_block(self, peer: Peer, payload: ProposedBlockPayload) -> 
         self.logger.info(f"Block from {payload.proposer_pubkey_hex[:8]} for round {payload.round_seed_hex[:8]} is an empty block and Merkle root is consistent.")
     else:
         try:
-            reconstructed_merkle_tree = MerkleTree(payload.transaction_hashes)
-            reconstructed_merkle_root = reconstructed_merkle_tree.get_root()
-            if reconstructed_merkle_root == payload.merkle_root:
+            # Ensure transaction_hashes are bytes for MerkleTree construction if they are not already
+            # Assuming payload.transaction_hashes are List[str] (nonces) as per model
+            transaction_nonces_bytes = [nonce.encode('utf-8') for nonce in payload.transaction_hashes]
+            reconstructed_merkle_tree = MerkleTree(transaction_nonces_bytes)
+            reconstructed_merkle_root_bytes = reconstructed_merkle_tree.get_root()
+            
+            if not reconstructed_merkle_root_bytes:
+                self.logger.error(f"Failed to reconstruct Merkle root for block by {payload.proposer_pubkey_hex[:8]}. Discarding block.")
+                return
+
+            reconstructed_merkle_root_hex = reconstructed_merkle_root_bytes.hex()
+
+            if reconstructed_merkle_root_hex == payload.merkle_root:
                 self.logger.info(f"Merkle root VERIFIED for block by {payload.proposer_pubkey_hex[:8]} (found {len(payload.transaction_hashes)} tx_hashes). Root: {payload.merkle_root}")
             else:
-                self.logger.warning(f"Merkle root INVALID for block by {payload.proposer_pubkey_hex[:8]}. Expected {payload.merkle_root}, got {reconstructed_merkle_root}. Discarding block.")
+                self.logger.warning(f"Merkle root INVALID for block by {payload.proposer_pubkey_hex[:8]}. Expected {payload.merkle_root}, got {reconstructed_merkle_root_hex}. Discarding block.")
                 return
         except Exception as e:
             self.logger.error(f"Error during Merkle root verification for block by {payload.proposer_pubkey_hex[:8]}: {e}. Discarding block.")
             return
             
     self.logger.info(f"Block from {payload.proposer_pubkey_hex[:8]} for round {payload.round_seed_hex[:8]} PASSED all verifications.")
+
+    # TODO: Process transactions in the block (e.g., move from mempool to a permanent block store if not already handled)
+    # For now, we assume transactions are already in the DB via on_transaction,
+    # and mempool clearing happens in pos_round for the proposer.
+    # Other nodes might want to clear their mempools based on received blocks.
+    for tx_nonce in payload.transaction_hashes:
+        if tx_nonce in self.community.mempool:
+            del self.community.mempool[tx_nonce]
+            self.logger.info(f"Removed transaction {tx_nonce[:8]} from mempool after block acceptance.")
+
+    # Generate and set the new seed for the next round
+    # Using the signature of the current accepted block as a basis for the new seed
+    new_seed_basis = bytes.fromhex(payload.signature) 
+    self.community.current_round_seed = hashlib.sha256(new_seed_basis).digest()
+    self.logger.info(f"Successfully processed block for round {payload.round_seed_hex[:8]}. New round seed set to: {self.community.current_round_seed.hex()[:16]}...")
+    
+    # Potentially, if this node was the proposer of this now-accepted block,
+    # it might cancel its own next pos_round if it was scheduled too soon,
+    # or let the natural POS_ROUND_INTERVAL handle it.
+    # For simplicity, we let the existing pos_round scheduling in community.py manage itself.
+    # If a new block is accepted, the next pos_round will use the new seed.

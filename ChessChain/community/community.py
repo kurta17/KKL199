@@ -49,7 +49,8 @@ class ChessCommunity(Community):
         self.sent: Set[Tuple[bytes, str]] = set()
         self.stakes: Dict[bytes, int] = {}
         self.pos_round_number = 0
-        self.current_round_seed = None
+        # Initialize with a deterministic seed for the first round
+        self.current_round_seed = hashlib.sha256(b"initial_chesschain_seed_value_05142025").digest()
  
         # Load existing transactions and stakes
         with self.db_env.begin(db=self.tx_db) as tx:
@@ -174,8 +175,8 @@ class ChessCommunity(Community):
             # Store move
             with self.db_env.begin(write=True) as txn:
                 moves_db = self.db_env.open_db(b'moves', txn=txn, create=True)
-                # Use a composite key: match_id + move_id
-                move_key = f"{match_id}_{move.id}".encode('utf-8')
+                # Use a composite key: match_id:move_id
+                move_key = f"{match_id}:{move.id}".encode('utf-8')
                 txn.put(move_key, packed_move, db=moves_db)
             # Broadcast move (optional, depending on your P2P logic for moves)
             # self.ez_send(self.get_random_peer(), move) # Example, adjust as needed
@@ -241,7 +242,26 @@ class ChessCommunity(Community):
         """Perform a round of PoS block proposal."""
         self.pos_round_number += 1
         current_time = time.time()
-        self.logger.info(f"Starting PoS round {self.pos_round_number} at {current_time}")
+        self.logger.info(f"Starting PoS round {self.pos_round_number} at {current_time} using seed {self.current_round_seed.hex() if self.current_round_seed else 'None'}")
+
+        if not self.current_round_seed:
+            self.logger.error(f"Round {self.pos_round_number}: No current round seed available. Skipping proposal.")
+            # Potentially use a default emergency seed or wait
+            await sleep(self.POS_ROUND_INTERVAL)
+            create_task(self.pos_round())
+            return
+
+        # Determine if this peer is the proposer for the current round seed
+        # The checking_proposer method expects bytes, self.current_round_seed is already bytes
+        selected_proposer_id = self.checking_proposer(self.current_round_seed)
+
+        if self.pubkey_bytes != selected_proposer_id:
+            self.logger.info(f"Round {self.pos_round_number}: This peer ({self.pubkey_bytes.hex()}) is not the selected proposer ({selected_proposer_id.hex()}). Skipping block proposal.")
+            await sleep(self.POS_ROUND_INTERVAL)
+            create_task(self.pos_round())
+            return
+        
+        self.logger.info(f"Round {self.pos_round_number}: This peer IS the selected proposer for seed {self.current_round_seed.hex()}.")
 
         # Fetch transactions from storage (e.g., LMDB)
         stored_transactions = self.get_stored_transactions()
@@ -274,53 +294,74 @@ class ChessCommunity(Community):
         if not transactions_to_propose:
             self.logger.info(f"Round {self.pos_round_number}: No transactions in mempool or DB to propose a block for.")
             await sleep(self.POS_ROUND_INTERVAL)
+            create_task(self.pos_round())
             return
 
         # Construct Merkle tree from transaction nonces
-        transaction_hashes = [tx.nonce for tx in transactions_to_propose]
-        if not transaction_hashes:
-            self.logger.warning(f"Round {self.pos_round_number}: Transaction hashes list is empty despite having transactions. This should not happen.")
+        transaction_nonces_bytes = [tx.nonce.encode('utf-8') for tx in transactions_to_propose]
+        transaction_nonces_str = [tx.nonce for tx in transactions_to_propose] # Added for payload
+
+        if not transaction_nonces_bytes: # Check based on bytes list used for Merkle tree
+            self.logger.warning(f"Round {self.pos_round_number}: Transaction nonces_bytes list is empty despite having transactions. This should not happen.")
             await sleep(self.POS_ROUND_INTERVAL)
+            create_task(self.pos_round())
             return
 
-        merkle_tree = MerkleTree(transaction_hashes)
-        merkle_root = merkle_tree.get_root()
-        if not merkle_root:
+        merkle_tree = MerkleTree(transaction_nonces_bytes) # Use bytes for Merkle tree
+        merkle_root_bytes = merkle_tree.get_root()
+        if not merkle_root_bytes:
             self.logger.error(f"Round {self.pos_round_number}: Failed to generate Merkle root.")
             await sleep(self.POS_ROUND_INTERVAL)
+            create_task(self.pos_round())
             return
+        
+        merkle_root = merkle_root_bytes.hex()
 
-        self.logger.info(f"Round {self.pos_round_number}: Merkle root for {len(transaction_hashes)} transactions: {merkle_root}")
+        self.logger.info(f"Round {self.pos_round_number}: Merkle root for {len(transaction_nonces_bytes)} transactions: {merkle_root}")
 
         # Create the proposed block payload
-        round_seed_hex = self.current_round_seed.hex() if self.current_round_seed else "0" * 64
+        # Use the seed that was used for this round's lottery
+        round_seed_hex = self.current_round_seed.hex() 
         proposer_pubkey_hex = self.pubkey_bytes.hex()
 
         block_data_to_sign_str = f"{round_seed_hex}:{merkle_root}:{proposer_pubkey_hex}"
         block_data_to_sign_bytes = block_data_to_sign_str.encode('utf-8')
         
         try:
-            signature_hex = self.sk.sign(block_data_to_sign_bytes).hex()
+            block_signature_bytes = self.sk.sign(block_data_to_sign_bytes)
+            block_signature_hex = block_signature_bytes.hex()
         except Exception as e:
             self.logger.error(f"Round {self.pos_round_number}: Error signing block data: {e}")
             await sleep(self.POS_ROUND_INTERVAL)
+            create_task(self.pos_round())
             return
 
         proposed_block = ProposedBlockPayload(
             round_seed_hex=round_seed_hex,
-            transaction_hashes=transaction_hashes,
+            transaction_hashes=transaction_nonces_str, # Use string list for payload
             merkle_root=merkle_root,
             proposer_pubkey_hex=proposer_pubkey_hex,
-            signature=signature_hex
+            signature=block_signature_hex
         )
 
-        self.logger.info(f"Round {self.pos_round_number}: Proposing block with Merkle root {merkle_root} and {len(transaction_hashes)} transactions.")
+        self.logger.info(f"Round {self.pos_round_number}: Proposed block with {len(transactions_to_propose)} transactions.")
+
+        # Broadcast the proposed block
         for peer in self.get_peers():
-            self.ez_send(peer, proposed_block)
+            if peer.mid != self.pubkey_bytes:
+                self.ez_send(peer, proposed_block)
         
-        for tx_nonce in transaction_hashes:
-            if tx_nonce in self.mempool:
-                del self.mempool[tx_nonce]
-        self.logger.info(f"Round {self.pos_round_number}: Cleared {len(transaction_hashes)} proposed transactions from mempool.")
+        # Clear proposed transactions from mempool using string nonces
+        cleared_from_mempool_count = 0
+        for tx_nonce_str_in_payload in transaction_nonces_str: # Iterate using the string list
+            if tx_nonce_str_in_payload in self.mempool:
+                del self.mempool[tx_nonce_str_in_payload]
+                cleared_from_mempool_count +=1
+        
+        if cleared_from_mempool_count > 0:
+            self.logger.info(f"Round {self.pos_round_number}: Cleared {cleared_from_mempool_count} proposed transactions from mempool.")
+        else:
+            self.logger.info(f"Round {self.pos_round_number}: No transactions from the proposed block were found in the mempool to clear.")
 
         await sleep(self.POS_ROUND_INTERVAL)
+        create_task(self.pos_round())
