@@ -25,7 +25,7 @@ class ChessCommunity(Community):
     community_id = b'chess_platform123456'
 
     INITIAL_STAKE = 120
-    POS_ROUND_INTERVAL = 5
+    POS_ROUND_INTERVAL = 15
     MIN_STAKE = 10
 
     def __init__(self, settings: CommunitySettings) -> None:
@@ -43,7 +43,7 @@ class ChessCommunity(Community):
         self.add_message_handler(BlockConfirmation, self.on_block_confirmation)
        
         # Set up databases
-        self.db_env = lmdb.open('chess_db', max_dbs=3, map_size=10**8)
+        self.db_env = lmdb.open('chess_db', max_dbs=128, map_size=10**8)
         self.tx_db = self.db_env.open_db(b'transactions')
         self.stake_db = self.db_env.open_db(b'stakes')
         self.moves_db = self.db_env.open_db(b'moves')
