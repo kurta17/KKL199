@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import time
 import uuid
 from asyncio import create_task, sleep
@@ -103,6 +104,10 @@ class ChessCommunity(Community):
         # Track pending sync requests
         self.pending_sync_requests = {}
 
+
+    MAX_BLOCK_AGE = 3600  # 1 hour
+    SYNC_TIMEOUT = 60     # 1 minute
+
     async def resolve_fork_with_retry(self, block: ProposedBlockPayload) -> bool:
         """Resolve a fork with block synchronization if needed."""
         # First try normal resolution
@@ -167,33 +172,24 @@ class ChessCommunity(Community):
 
     @lazy_wrapper(BlockSyncResponse) 
     async def on_block_sync_response(self, peer: Peer, payload: BlockSyncResponse) -> None:
-        """Handle responses to block synchronization requests."""
+        """Handle responses to block synchronization requests with validation."""
         self.logger.info(f"Received block sync response for {payload.request_hash[:16]} with blocks")
-        
-        # Track sync response for startup sequence
-        if not hasattr(self, 'sync_responses_received'):
-            self.sync_responses_received = 0
-        self.sync_responses_received += 1
-        
-        # Deserialize the blocks data
         try:
             blocks = json.loads(payload.blocks_data)
-            self.logger.info(f"Received {len(blocks)} blocks in sync response")
-            
-            # Store the received blocks
             blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
-            
             new_blocks_count = 0
             with self.db_env.begin(db=blocks_db, write=True) as txn:
                 for block_hash, block_data_hex in blocks.items():
-                    # Skip if we already have this block
                     if txn.get(block_hash.encode('utf-8')):
                         continue
-                        
                     block_data = bytes.fromhex(block_data_hex)
+                    # Validate block before storing
+                    block, _ = default_serializer.unpack_serializable(ProposedBlockPayload, block_data)
+                    if abs(time.time() - block.timestamp) > self.MAX_BLOCK_AGE:
+                        self.logger.warning(f"Skipping old block {block_hash[:16]}")
+                        continue
                     txn.put(block_hash.encode('utf-8'), block_data)
                     new_blocks_count += 1
-                    
             self.logger.info(f"Stored {new_blocks_count} new blocks in database")
             
             # If we received new blocks, consider sync successful
@@ -912,43 +908,34 @@ class ChessCommunity(Community):
             
         self.logger.info(f"Stored proposed block with ID {block_id.decode('utf-8')}")
     
+
+    
+
     def resolve_fork(self, proposed_block: ProposedBlockPayload) -> bool:
-        """Attempt to resolve a blockchain fork.
-        
-        Args:
-            proposed_block: The block that caused the fork detection
-            
-        Returns:
-            bool: True if the fork was resolved, False if not
-        """
+        """Attempt to resolve a blockchain fork with enhanced validation."""
         self.logger.warning("Fork detected! Attempting to resolve...")
-        
-        # Get the chain from the proposed block's previous hash
+
+        # Validate block age
+        if abs(time.time() - proposed_block.timestamp) > MAX_BLOCK_AGE:
+            self.logger.warning(f"Proposed block is too old (timestamp: {proposed_block.timestamp}). Rejecting.")
+            return False
+
         alt_chain = self.get_chain_from_hash(proposed_block.previous_block_hash)
-        
         if not alt_chain:
             self.logger.warning(f"Unable to find alternative chain for previous hash {proposed_block.previous_block_hash[:16]}")
             return False
-        
-        # Get our current chain
+
         my_chain = self.get_chain_from_hash(self.get_latest_block_hash())
-        
-        # Compare chain lengths (simple longest chain wins rule)
         if len(alt_chain) > len(my_chain):
             self.logger.info(f"Alternative chain is longer ({len(alt_chain)} > {len(my_chain)}). Switching to it.")
-            
-            # Re-process any transactions that might have been lost
             self.reprocess_transactions(my_chain, alt_chain)
-            
-            # Update our chain pointer
             self.current_chain_head = proposed_block.previous_block_hash
-            
-            # Important: Log the change for debugging
             self.logger.info(f"Chain head updated to {self.current_chain_head[:16]}")
             return True
         else:
             self.logger.info(f"Our chain is longer or equal ({len(my_chain)} >= {len(alt_chain)}). Keeping it.")
             return False
+
 
     def get_chain_from_hash(self, start_hash: str, max_blocks: int = 100) -> List[str]:
         """Get chain of blocks starting from a specific hash.

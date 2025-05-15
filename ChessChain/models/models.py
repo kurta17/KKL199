@@ -104,12 +104,10 @@ class ProposerAnnouncement(DataClassPayload):
     
     @classmethod
     def from_unpack_list(cls, *args):
-        # If we're getting 5 fields but only need the last 2
-        if len(args) == 5:
-            _, _, _, round_seed_hex, proposer_pubkey_hex = args
-            return cls(round_seed_hex, proposer_pubkey_hex)
-        # Normal case with just our 2 fields
-        return cls(*args)
+        # Always extract the last two arguments as the fields
+        if len(args) >= 2:
+            return cls(args[-2], args[-1])
+        raise ValueError(f"ProposerAnnouncement.from_unpack_list expects at least 2 arguments, got {len(args)}")
 
 @dataclass
 class MoveData(DataClassPayload):
