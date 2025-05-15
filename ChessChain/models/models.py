@@ -97,8 +97,12 @@ class ProposedBlockPayload(DataClassPayload):
 @dataclass
 class ProposerAnnouncement(DataClassPayload):
     """Payload for a peer announcing it is the proposer for a round."""
-    msg_id = PROPOSER_ANNOUNCEMENT_MSG_ID  # Assign msg_id directly
+    msg_id = PROPOSER_ANNOUNCEMENT_MSG_ID
 
+    # Include all fields from the wire format
+    round_number: int
+    seed_hex: str
+    proposer_hex: str
     round_seed_hex: str
     proposer_pubkey_hex: str
 
