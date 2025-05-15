@@ -68,8 +68,10 @@ async def on_proposer_announcement(self, peer: Peer, payload: ProposerAnnounceme
     print(f"Received ProposerAnnouncement for round {payload.round_seed_hex[:8]} from {payload.proposer_pubkey_hex[:8]} (peer {peer.mid.hex()[:8] if peer else 'Unknown Peer'})")
 
 
-@lazy_wrapper(ProposedBlockPayload)
-async def on_proposed_block(self, peer: Peer, payload: ProposedBlockPayload) -> None:
+async def on_proposed_block(self, source_address, data):
+    # Unpack the data manually
+    peer = Peer(source_address)
+    payload, _ = default_serializer.unpack_serializable(ProposedBlockPayload, data)
     """Handles an incoming proposed block with full validation."""
     self.logger.info(f"Received ProposedBlockPayload for round {payload.round_seed_hex[:8]} from peer {peer.mid.hex()[:8] if peer else 'Unknown Peer'} (claimed proposer: {payload.proposer_pubkey_hex[:8]})")
 
