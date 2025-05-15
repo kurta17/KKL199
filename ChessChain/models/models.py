@@ -6,7 +6,7 @@ from typing import List
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 
-from ipv8.messaging.payload_dataclass import DataClassPayload
+from ipv8.messaging.payload_dataclass import DataClassPayload, Serializable
 
 CHESS_TRANSACTION_MSG_ID = 1
 PROPOSED_BLOCK_MSG_ID = 2
@@ -14,6 +14,36 @@ PROPOSER_ANNOUNCEMENT_MSG_ID = 3
 MOVE_DATA_MSG_ID = 4
 VALIDATOR_VOTE_MSG_ID = 5
 BLOCK_CONFIRMATION_MSG_ID = 6
+
+
+class BlockSyncRequest(Serializable):
+    msg_id = 8
+    """Request blocks from a given hash."""
+    format_list = ['varlenH', 'I']
+
+    
+    def __init__(self, block_hash: str, count: int = 10):
+        self.block_hash = block_hash
+        self.count = count
+    
+    @classmethod
+    def from_unpack_list(cls, block_hash: str, count: int):
+        return BlockSyncRequest(block_hash, count)
+
+class BlockSyncResponse(Serializable):
+    """Response to a block sync request containing serialized blocks."""
+    msg_id = 7
+
+    format_list = ['varlenH', 'varlenH'] 
+    
+    def __init__(self, request_hash: str, blocks_data: str):
+        self.request_hash = request_hash
+        self.blocks_data = blocks_data
+        
+    @classmethod
+    def from_unpack_list(cls, request_hash: str, blocks_data: str):
+        return BlockSyncResponse(request_hash, blocks_data)
+
 
 @dataclass
 class ProposedBlockPayload(DataClassPayload):

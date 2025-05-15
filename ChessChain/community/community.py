@@ -21,29 +21,7 @@ from utils.utils import lottery_selection
 from utils.merkle import MerkleTree
 from ipv8.messaging.payload_dataclass import DataClassPayload, Serializable
 
-class BlockSyncRequest(Serializable):
-    """Request blocks from a given hash."""
-    format_list = ['varlenH', 'I']
-    
-    def __init__(self, block_hash: str, count: int = 10):
-        self.block_hash = block_hash
-        self.count = count
-    
-    @classmethod
-    def from_unpack_list(cls, block_hash: str, count: int):
-        return BlockSyncRequest(block_hash, count)
 
-class BlockSyncResponse(Serializable):
-    """Response to a block sync request containing serialized blocks."""
-    format_list = ['varlenH', 'varlenH'] 
-    
-    def __init__(self, request_hash: str, blocks_data: str):
-        self.request_hash = request_hash
-        self.blocks_data = blocks_data
-        
-    @classmethod
-    def from_unpack_list(cls, request_hash: str, blocks_data: str):
-        return BlockSyncResponse(request_hash, blocks_data)
 
 
 
@@ -124,6 +102,29 @@ class ChessCommunity(Community):
         
         # Track pending sync requests
         self.pending_sync_requests = {}
+
+    async def resolve_fork_with_retry(self, block: ProposedBlockPayload) -> bool:
+        """Resolve a fork with block synchronization if needed."""
+        # First try normal resolution
+        fork_resolved = self.resolve_fork(block)
+        
+        # If that fails due to missing blocks, request them
+        if not fork_resolved:
+            self.logger.info(f"Normal fork resolution failed. Requesting blocks from peer chain...")
+            
+            # Find peers that might have this block's chain
+            for peer in self.get_peers():
+                # Store this block info for when response arrives
+                self.pending_sync_requests[block.previous_block_hash] = block
+                
+                # Send sync request
+                request = BlockSyncRequest(block.previous_block_hash)
+                self.ez_send(peer, request)
+                self.logger.info(f"Sent block sync request for {block.previous_block_hash[:16]} to {peer.mid.hex()[:8]}")
+            
+            return False  # Still not resolved, waiting for sync
+        
+        return True  # Fork resolved
 
     @lazy_wrapper(BlockSyncRequest)
     async def on_block_sync_request(self, peer: Peer, payload: BlockSyncRequest) -> None:
@@ -226,10 +227,12 @@ class ChessCommunity(Community):
 
         # Check if there's a fork and try to resolve it
         if payload.previous_block_hash != self.get_latest_block_hash():
-            fork_resolved = self.resolve_fork(payload)
+            fork_resolved = await self.resolve_fork_with_retry(payload)
             if not fork_resolved:
-                self.logger.warning(f"Previous block hash mismatch. Expected {self.get_latest_block_hash()[:16]}, got {payload.previous_block_hash[:16]}. Discarding.")
+                self.logger.warning(f"Previous block hash mismatch. Expected {self.get_latest_block_hash()[:16]}, got {payload.previous_block_hash[:16]}. Attempting to sync blocks...")
                 return
+            else:
+                self.logger.info(f"Fork successfully resolved!")
         
         """Handles an incoming proposed block with full validation."""
         self.logger.info(f"Received ProposedBlockPayload for round {payload.round_seed_hex[:8]} from peer {peer.mid.hex()[:8] if peer else 'Unknown Peer'} (claimed proposer: {payload.proposer_pubkey_hex[:8]})")
