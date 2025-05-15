@@ -96,7 +96,7 @@ class ChessCommunity(Community):
         self.current_chain_head = None
         self.initialize_blockchain()
 
-            # Add handlers for block synchronization
+        # Add handlers for block synchronization
         self.add_message_handler(BlockSyncRequest, self.on_block_sync_request)
         self.add_message_handler(BlockSyncResponse, self.on_block_sync_response)
         
@@ -901,11 +901,8 @@ class ChessCommunity(Community):
                 for p in self.get_peers():
                     if p.mid != self.pubkey_bytes:
                         announcement = ProposerAnnouncement(
-                            round_number=self.pos_round_number,
-                            seed_hex=seed.hex(),
-                            proposer_hex=self.pubkey_bytes.hex(),
                             round_seed_hex=seed.hex(),
-                            proposer_pubkey_hex=self.pubkey_bytes.hex()
+                            proposer_pubkey_hex=self.pubkey_bytes.hex(),
                         )
                         serialized = default_serializer.pack_serializable(announcement)
                         self.logger.debug(f"Sending announcement: {len(serialized)} bytes, fields: {seed.hex()[:8]}, {self.pubkey_bytes.hex()[:8]}")
