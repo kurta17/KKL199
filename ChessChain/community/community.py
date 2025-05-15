@@ -225,20 +225,17 @@ class ChessCommunity(Community):
         genesis_tx_hash = hashlib.sha256(f"genesis_tx_{genesis_time}".encode()).hexdigest()
 
         # Calculate Merkle root for the genesis transaction
-        # This aligns with how Merkle roots are calculated for regular blocks
         merkle_tree_genesis = MerkleTree([genesis_tx_hash])
         genesis_merkle_root = merkle_tree_genesis.get_root()
         if not genesis_merkle_root:
-            # This should not happen with a single transaction, but handle defensively
             self.logger.error("Failed to generate Merkle root for genesis block. Using a fallback.")
-            # Fallback to a predefined hash or raise an error, depending on desired robustness
             genesis_merkle_root = hashlib.sha256("fallback_genesis_root_error".encode()).hexdigest()
-            # Consider raising an exception here if a valid Merkle root is critical for startup
-            # raise RuntimeError("Failed to generate Merkle root for genesis block")
 
-        # Sign the genesis block with our key
-        # The data signed includes the actual Merkle root of the genesis transaction
-        genesis_data_to_sign = f"{genesis_seed}:{genesis_merkle_root}:{self.pubkey_bytes.hex()}:genesis:{genesis_time}"
+        # For genesis block, use all zeros as previous hash
+        previous_block_hash = "0" * 64  # 64 hex characters = 32 bytes
+
+        # Sign the genesis block with our key - use the same format as regular blocks
+        genesis_data_to_sign = f"{genesis_seed}:{genesis_merkle_root}:{self.pubkey_bytes.hex()}:{previous_block_hash}:{genesis_time}"
         genesis_signature = self.sk.sign(genesis_data_to_sign.encode('utf-8')).hex()
 
         # Create the genesis block payload
@@ -248,26 +245,24 @@ class ChessCommunity(Community):
             merkle_root=genesis_merkle_root,
             proposer_pubkey_hex=self.pubkey_bytes.hex(),
             signature=genesis_signature,
-            previous_block_hash="\x00" * 32,
+            previous_block_hash=previous_block_hash,
             timestamp=genesis_time
         )
 
-        # The genesis block doesn't have a previous block, so we can use a placeholder
-        # Calculate block hash using the same data that was signed
+        # Calculate block hash using the SAME format as in add_confirmed_block()
         genesis_block_hash = hashlib.sha256(genesis_data_to_sign.encode('utf-8')).hexdigest()
         
         with self.db_env.begin(db=blocks_db, write=True) as txn:
             # Convert the transaction_hashes list to a string before serialization
-            # This is a temporary hack to work around the serialization issue
             tx_hashes_str = ",".join(genesis_block.transaction_hashes)
             
             modified_block = ProposedBlockPayload(
                 round_seed_hex=genesis_block.round_seed_hex,
-                transaction_hashes_str=tx_hashes_str,  # Changed from transaction_hashes=[tx_hashes_str]
+                transaction_hashes_str=tx_hashes_str,
                 merkle_root=genesis_block.merkle_root,
                 proposer_pubkey_hex=genesis_block.proposer_pubkey_hex,
                 signature=genesis_block.signature,
-                previous_block_hash=genesis_block.previous_block_hash,
+                previous_block_hash=previous_block_hash,
                 timestamp=genesis_block.timestamp
             )
             
@@ -275,7 +270,7 @@ class ChessCommunity(Community):
             txn.put(genesis_block_hash.encode('utf-8'), serialized_genesis)
 
         self.logger.info(f"Initialized blockchain with genesis block {genesis_block_hash[:16]}")
-
+        self.logger.info(f"Genesis block created with seed {genesis_seed} and Merkle root {genesis_merkle_root[:16]}")    
         # Create a dummy genesis transaction and store it in the database
         try:
             # The nonce of the genesis transaction is its hash, used in the Merkle tree
@@ -325,7 +320,7 @@ class ChessCommunity(Community):
         with self.db_env.begin(db=self.tx_db, write=False) as txn:
             return txn.get(nonce.encode('utf-8')) is not None
         
-        
+
     def checking_proposer(self, seed: bytes) -> bool:
         """Check if this peer is the proposer for the current round.
         

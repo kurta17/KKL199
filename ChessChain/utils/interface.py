@@ -60,7 +60,7 @@ async def manual_send_loop(comm: ChessCommunity) -> None:
                     print("No moves found for this match.")
                 for move in moves:
                     print(f"Move {move.id}: {move.player} played {move.move}")
-                   
+                      
             else:
                 print(f"Unknown command: {cmd[0]}")
                 print_help()
