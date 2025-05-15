@@ -389,7 +389,6 @@ class ChessCommunity(Community):
             txn.put(genesis_block_hash.encode('utf-8'), serialized_genesis)
 
         self.logger.info(f"Initialized blockchain with genesis block {genesis_block_hash[:16]}")
-        self.logger.info(f"Genesis block created with seed {genesis_seed} and Merkle root {genesis_merkle_root[:16]}")    
         # Create a dummy genesis transaction and store it in the database
         try:
             # The nonce of the genesis transaction is its hash, used in the Merkle tree
