@@ -86,7 +86,9 @@ class ChessCommunity(Community):
         # Assign initial stake to this peer if it doesn't have any
         if self.pubkey_bytes not in self.stakes:
             self.stake_tokens(self.INITIAL_STAKE)
-        
+
+
+        self.current_chain_head = None
         self.initialize_blockchain()
 
     
@@ -117,6 +119,13 @@ class ChessCommunity(Community):
     @lazy_wrapper(ProposedBlockPayload)
     async def on_proposed_block(self, peer: Peer, payload: ProposedBlockPayload) -> None:
 
+        # Check if there's a fork and try to resolve it
+        if payload.previous_block_hash != self.get_latest_block_hash():
+            fork_resolved = self.resolve_fork(payload)
+            if not fork_resolved:
+                self.logger.warning(f"Previous block hash mismatch. Expected {self.get_latest_block_hash()[:16]}, got {payload.previous_block_hash[:16]}. Discarding.")
+                return
+        
         """Handles an incoming proposed block with full validation."""
         self.logger.info(f"Received ProposedBlockPayload for round {payload.round_seed_hex[:8]} from peer {peer.mid.hex()[:8] if peer else 'Unknown Peer'} (claimed proposer: {payload.proposer_pubkey_hex[:8]})")
 
@@ -531,9 +540,99 @@ class ChessCommunity(Community):
                 if tx_hash in self.mempool:
                     del self.mempool[tx_hash]
     
+
+
+    def reprocess_transactions(self, old_chain: List[str], new_chain: List[str]) -> None:
+        """Re-process any transactions that might have been lost or need to be reverted
+        when switching from one chain to another.
+        
+        Args:
+            old_chain: The chain we're switching from
+            new_chain: The chain we're switching to
+        """
+        self.logger.info(f"Reprocessing transactions when switching chains")
+        
+        # Find the common ancestor block
+        common_ancestor = None
+        old_blocks_set = set(old_chain)
+        for block_hash in new_chain:
+            if block_hash in old_blocks_set:
+                common_ancestor = block_hash
+                break
+        
+        if not common_ancestor:
+            self.logger.warning("No common ancestor found between chains, cannot safely reprocess transactions")
+            return
+            
+        # Collect transactions to revert (in old_chain after fork) and to apply (in new_chain after fork)
+        transactions_to_revert = []
+        transactions_to_apply = []
+        
+        blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
+        
+        # Collect transactions in blocks that need to be reverted
+        with self.db_env.begin(db=blocks_db) as txn:
+            for block_hash in old_chain:
+                if block_hash == common_ancestor:
+                    break
+                    
+                block_data = txn.get(block_hash.encode('utf-8'))
+                if block_data:
+                    try:
+                        block, _ = default_serializer.unpack_serializable(ProposedBlockPayload, block_data)
+                        transactions_to_revert.extend(block.transaction_hashes)
+                    except Exception as e:
+                        self.logger.error(f"Error unpacking block {block_hash[:16]} for reversion: {e}")
+        
+        # Collect transactions in blocks that need to be applied
+        with self.db_env.begin(db=blocks_db) as txn:
+            for block_hash in new_chain:
+                if block_hash == common_ancestor:
+                    break
+                    
+                block_data = txn.get(block_hash.encode('utf-8'))
+                if block_data:
+                    try:
+                        block, _ = default_serializer.unpack_serializable(ProposedBlockPayload, block_data)
+                        transactions_to_apply.extend(block.transaction_hashes)
+                    except Exception as e:
+                        self.logger.error(f"Error unpacking block {block_hash[:16]} for application: {e}")
+        
+        self.logger.info(f"Reverting {len(transactions_to_revert)} transactions and applying {len(transactions_to_apply)} transactions")
+        
+        # Mark reverted transactions as unprocessed so they can be included in future blocks if valid
+        processed_db = self.db_env.open_db(b'processed_transactions', create=True)
+        with self.db_env.begin(db=processed_db, write=True) as txn:
+            for tx_hash in transactions_to_revert:
+                try:
+                    txn.delete(tx_hash.encode())
+                    # Re-add to mempool if it's still valid
+                    with self.db_env.begin(db=self.tx_db) as tx_txn:
+                        tx_data = tx_txn.get(tx_hash.encode())
+                        if tx_data:
+                            tx, _ = default_serializer.unpack_serializable(ChessTransaction, tx_data)
+                            self.mempool[tx_hash] = tx
+                except Exception as e:
+                    self.logger.error(f"Error reverting transaction {tx_hash}: {e}")
+        
+        # Mark applied transactions as processed
+        with self.db_env.begin(db=processed_db, write=True) as txn:
+            for tx_hash in transactions_to_apply:
+                try:
+                    txn.put(tx_hash.encode(), b'1')
+                    # Remove from mempool
+                    if tx_hash in self.mempool:
+                        del self.mempool[tx_hash]
+                except Exception as e:
+                    self.logger.error(f"Error applying transaction {tx_hash}: {e}")
+                    
     def get_latest_block_hash(self) -> str:
         """Get the hash of the latest confirmed block in the blockchain."""
-        # Open a database for confirmed blocks if needed
+        # If we have a tracked current head, return it
+        if self.current_chain_head:
+            return self.current_chain_head
+            
+        # Otherwise fall back to database lookup
         blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
         
         latest_hash = ""
@@ -542,10 +641,9 @@ class ChessCommunity(Community):
             # Position at last key
             if cursor.last():
                 latest_hash = cursor.key().decode('utf-8')
-            # else:
-            #     # Genesis block placeholder hash if no blocks exist yet
-            #     latest_hash = hashlib.sha256("genesis".encode()).hexdigest()
         
+        # Update our tracked head
+        self.current_chain_head = latest_hash
         return latest_hash
     
     def select_propagation_peers(self, count: int = 5) -> List[Peer]:
@@ -597,6 +695,81 @@ class ChessCommunity(Community):
             
         self.logger.info(f"Stored proposed block with ID {block_id.decode('utf-8')}")
     
+    def resolve_fork(self, proposed_block: ProposedBlockPayload) -> bool:
+        """Attempt to resolve a blockchain fork.
+        
+        Args:
+            proposed_block: The block that caused the fork detection
+            
+        Returns:
+            bool: True if the fork was resolved, False if not
+        """
+        self.logger.warning("Fork detected! Attempting to resolve...")
+        
+        # Get the chain from the proposed block's previous hash
+        alt_chain = self.get_chain_from_hash(proposed_block.previous_block_hash)
+        
+        if not alt_chain:
+            self.logger.warning(f"Unable to find alternative chain for previous hash {proposed_block.previous_block_hash[:16]}")
+            return False
+        
+        # Get our current chain
+        my_chain = self.get_chain_from_hash(self.get_latest_block_hash())
+        
+        # Compare chain lengths (simple longest chain wins rule)
+        if len(alt_chain) > len(my_chain):
+            self.logger.info(f"Alternative chain is longer ({len(alt_chain)} > {len(my_chain)}). Switching to it.")
+            
+            # Re-process any transactions that might have been lost
+            self.reprocess_transactions(my_chain, alt_chain)
+            
+            # Update our chain pointer
+            self.current_chain_head = proposed_block.previous_block_hash
+            
+            # Important: Log the change for debugging
+            self.logger.info(f"Chain head updated to {self.current_chain_head[:16]}")
+            return True
+        else:
+            self.logger.info(f"Our chain is longer or equal ({len(my_chain)} >= {len(alt_chain)}). Keeping it.")
+            return False
+
+    def get_chain_from_hash(self, start_hash: str, max_blocks: int = 100) -> List[str]:
+        """Get chain of blocks starting from a specific hash.
+        
+        Args:
+            start_hash: Hash to start from
+            max_blocks: Maximum blocks to retrieve
+            
+        Returns:
+            List of block hashes in the chain
+        """
+        chain = []
+        blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
+        
+        current_hash = start_hash
+        
+        with self.db_env.begin(db=blocks_db) as txn:
+            while current_hash and len(chain) < max_blocks:
+                block_data = txn.get(current_hash.encode('utf-8'))
+                if not block_data:
+                    break
+                    
+                chain.append(current_hash)
+                
+                try:
+                    block = default_serializer.unpack_serializable(ProposedBlockPayload, block_data)
+                    current_hash = block.previous_block_hash
+                    
+                    # Stop at genesis block
+                    if current_hash == "0" * 64:
+                        chain.append(current_hash)
+                        break
+                except Exception as e:
+                    self.logger.error(f"Error deserializing block: {e}")
+                    break
+                    
+        return chain
+
     async def pos_round(self) -> None:
         """Perform a round of PoS block proposal."""
         while True:

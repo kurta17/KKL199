@@ -25,6 +25,8 @@ def check_port(port: int) -> bool:
             return False
 
 
+
+
 def lottery_selection(seed: bytes, p_id: bytes, total_stake: int, peers: List[str]) -> bool:
     """Lottery-based random selection based on stake.
     
