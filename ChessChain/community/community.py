@@ -336,49 +336,38 @@ class ChessCommunity(Community):
                 del self.mempool[payload.nonce]
 
 
+    
+    GENESIS_PUBKEY_HEX = "..."  # The hex of the fixed genesis public key
+    GENESIS_SIGNATURE = "..."   # The hex signature for the genesis block
+    GENESIS_TIME = 1714501200
+    GENESIS_SEED = "000000..."  # as before
+
     def initialize_blockchain(self) -> None:
-        """Initialize the blockchain with a genesis block if none exists."""
         blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
-        
-        # Check if we already have blocks
         with self.db_env.begin(db=blocks_db) as txn:
             cursor = txn.cursor()
-            if cursor.first():  # If there's at least one block
+            if cursor.first():
                 self.logger.info("Blockchain already initialized with existing blocks")
                 return
-        
-        # Create genesis block with special parameters
-        genesis_seed = "0000000000000000000000000000000000000000000000000000000000000000"
-        genesis_time = 1714501200
-        
-        # Create a dummy genesis transaction hash
-        genesis_tx_hash = hashlib.sha256(f"genesis_tx_{genesis_time}".encode()).hexdigest()
 
-        # Calculate Merkle root for the genesis transaction
+        # Use the hardcoded genesis block (not self.pubkey_bytes)
+        genesis_tx_hash = hashlib.sha256(f"genesis_tx_{self.GENESIS_TIME}".encode()).hexdigest()
         merkle_tree_genesis = MerkleTree([genesis_tx_hash])
         genesis_merkle_root = merkle_tree_genesis.get_root()
-        if not genesis_merkle_root:
-            self.logger.error("Failed to generate Merkle root for genesis block. Using a fallback.")
-            genesis_merkle_root = hashlib.sha256("fallback_genesis_root_error".encode()).hexdigest()
+        previous_block_hash = "0" * 64
 
-        # For genesis block, use all zeros as previous hash
-        previous_block_hash = "0" * 64  # 64 hex characters = 32 bytes
-
-        # Sign the genesis block with our key - use the same format as regular blocks
-        genesis_data_to_sign = f"{genesis_seed}:{genesis_merkle_root}:{self.pubkey_bytes.hex()}:{previous_block_hash}:{genesis_time}"
-        genesis_signature = self.sk.sign(genesis_data_to_sign.encode('utf-8')).hex()
-
-        # Create the genesis block payload
+        # Use the hardcoded signature and pubkey
         genesis_block = ProposedBlockPayload.create(
-            round_seed_hex=genesis_seed,
+            round_seed_hex=self.GENESIS_SEED,
             transaction_hashes=[genesis_tx_hash],
             merkle_root=genesis_merkle_root,
-            proposer_pubkey_hex=self.pubkey_bytes.hex(),
-            signature=genesis_signature,
+            proposer_pubkey_hex=self.GENESIS_PUBKEY_HEX,
+            signature=self.GENESIS_SIGNATURE,
             previous_block_hash=previous_block_hash,
-            timestamp=genesis_time
+            timestamp=self.GENESIS_TIME
         )
 
+        genesis_data_to_sign = f"{self.GENESIS_SEED}:{genesis_merkle_root}:{self.GENESIS_PUBKEY_HEX}:{previous_block_hash}:{self.GENESIS_TIME}"
         # Calculate block hash using the SAME format as in add_confirmed_block()
         genesis_block_hash = hashlib.sha256(genesis_data_to_sign.encode('utf-8')).hexdigest()
         
