@@ -4,6 +4,8 @@ import time
 import uuid
 from asyncio import create_task, sleep
 from typing import Dict, List, Set, Tuple
+from ipv8.lazy_community import lazy_wrapper
+from cryptography.exceptions import InvalidSignature 
 
 import asyncio
 import lmdb
@@ -16,7 +18,7 @@ from ipv8.messaging.serialization import default_serializer
 from models.models import ChessTransaction, MoveData, ProposedBlockPayload, ProposerAnnouncement
 from utils.utils import lottery_selection
 from utils.merkle import MerkleTree
-from .messages import on_transaction, on_proposed_block, on_proposer_announcement, on_move
+from .messages import on_proposed_block, on_proposer_announcement, on_move
 
 
 class ChessCommunity(Community):
@@ -34,7 +36,7 @@ class ChessCommunity(Community):
         self.add_message_handler(ProposedBlockPayload, on_proposed_block)
         self.add_message_handler(ProposerAnnouncement, on_proposer_announcement)
         
-        self.add_message_handler(ChessTransaction, on_transaction)
+        self.add_message_handler(ChessTransaction, self.on_transaction)
         self.add_message_handler(MoveData, on_move)
         
         # Add handlers for the validation messages
@@ -87,6 +89,41 @@ class ChessCommunity(Community):
             self.stake_tokens(self.INITIAL_STAKE)
         
         self.initialize_blockchain()
+
+
+    @lazy_wrapper(ChessTransaction)
+    def on_transaction(self, peer: Peer, payload: ChessTransaction) -> None:
+        """Handle incoming transactions with verification and storage using default_serializer."""
+        try:
+            proposer_pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(payload.proposer_pubkey_hex))
+            tx_data_to_verify = f"{payload.match_id}:{payload.winner}:{payload.nonce}:{payload.proposer_pubkey_hex}".encode()
+            proposer_pubkey.verify(bytes.fromhex(payload.signature), tx_data_to_verify)
+            self.logger.info(f"Transaction {payload.nonce} signature verified successfully.")
+        except InvalidSignature:
+            self.logger.warning(f"Transaction {payload.nonce} from {peer.mid.hex()[:8] if peer else 'Unknown Peer'} failed signature verification. Discarding.")
+            return
+        except Exception as e:
+            self.logger.error(f"Error during signature verification for transaction {payload.nonce}: {e}. Discarding.")
+            return
+
+        if payload.nonce in self.mempool or self.is_transaction_in_db(payload.nonce):
+            self.logger.info(f"Transaction {payload.nonce} already processed or in mempool. Skipping.")
+            return
+
+        self.mempool[payload.nonce] = payload 
+        self.logger.info(f"Transaction {payload.nonce} added to mempool. Mempool size: {len(self.mempool)}")
+
+        try:
+            packed_tx = default_serializer.pack_serializable(payload)
+            with self.db_env.begin(write=True) as txn:
+                tx_db = self.db_env.open_db(b'transactions', txn=txn, create=True)
+                txn.put(payload.nonce.encode('utf-8'), packed_tx, db=tx_db)
+            self.logger.info(f"Accepted and stored transaction {payload.nonce} from {peer.mid.hex()[:8] if peer else 'Unknown Peer'}")
+        except Exception as e:
+            self.logger.error(f"Failed to store transaction {payload.nonce} in DB: {e}")
+            if payload.nonce in self.mempool:
+                del self.mempool[payload.nonce]
+
 
     def initialize_blockchain(self) -> None:
         """Initialize the blockchain with a genesis block if none exists."""
