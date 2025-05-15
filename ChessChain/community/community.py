@@ -219,7 +219,7 @@ class ChessCommunity(Community):
         
         # Create genesis block with special parameters
         genesis_seed = "0000000000000000000000000000000000000000000000000000000000000000"
-        genesis_time = int(time.time())
+        genesis_time = 1714501200
         
         # Create a dummy genesis transaction hash
         genesis_tx_hash = hashlib.sha256(f"genesis_tx_{genesis_time}".encode()).hexdigest()
@@ -542,9 +542,9 @@ class ChessCommunity(Community):
             # Position at last key
             if cursor.last():
                 latest_hash = cursor.key().decode('utf-8')
-            else:
-                # Genesis block placeholder hash if no blocks exist yet
-                latest_hash = hashlib.sha256("genesis".encode()).hexdigest()
+            # else:
+            #     # Genesis block placeholder hash if no blocks exist yet
+            #     latest_hash = hashlib.sha256("genesis".encode()).hexdigest()
         
         return latest_hash
     
