@@ -26,6 +26,12 @@ class BlockSyncRequest(Serializable):
         self.block_hash = block_hash
         self.count = count
     
+    def to_pack_list(self):
+        """Convert this request to a serializable format."""
+        return [('varlenH', self.block_hash),
+                ('I', self.count)]
+    
+
     @classmethod
     def from_unpack_list(cls, block_hash: str, count: int):
         return BlockSyncRequest(block_hash, count)
@@ -39,7 +45,12 @@ class BlockSyncResponse(Serializable):
     def __init__(self, request_hash: str, blocks_data: str):
         self.request_hash = request_hash
         self.blocks_data = blocks_data
-        
+
+    def to_pack_list(self):
+        """Convert this response to a serializable format."""
+        return [('varlenH', self.request_hash),
+                ('varlenH', self.blocks_data)]
+ 
     @classmethod
     def from_unpack_list(cls, request_hash: str, blocks_data: str):
         return BlockSyncResponse(request_hash, blocks_data)
