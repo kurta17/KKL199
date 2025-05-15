@@ -1,6 +1,6 @@
 import base64
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -18,15 +18,41 @@ BLOCK_CONFIRMATION_MSG_ID = 6
 @dataclass
 class ProposedBlockPayload(DataClassPayload):
     """Payload for broadcasting a proposed block."""
-    msg_id = PROPOSED_BLOCK_MSG_ID  # Assign msg_id directly
+    msg_id = PROPOSED_BLOCK_MSG_ID
 
     round_seed_hex: str
-    transaction_hashes: List[str]  # Changed from transactions_json
-    merkle_root: str  # Added Merkle root
+    transaction_hashes_str: str  # Changed from transaction_hashes: List[str]
+    merkle_root: str
     proposer_pubkey_hex: str
     signature: str
-    timestamp: int = 0  # Unix timestamp for block ordering
-    previous_block_hash: str = ""  # Hash of the previous block
+    previous_block_hash: str
+    timestamp: int = 0
+
+    # Keep only ONE property method
+    @property
+    def transaction_hashes(self) -> List[str]:
+        """Get transaction hashes as a list."""
+        if not self.transaction_hashes_str:
+            return []
+        return self.transaction_hashes_str.split(",")
+    
+    # Remove the duplicate property with the same name
+    
+    @classmethod
+    def create(cls, round_seed_hex: str, transaction_hashes: List[str], 
+               merkle_root: str, proposer_pubkey_hex: str,
+               signature: str, previous_block_hash: str, timestamp: int = 0):
+        """Factory method to create from a list of transaction hashes."""
+        transaction_hashes_str = ",".join(transaction_hashes)
+        return cls(
+            round_seed_hex=round_seed_hex,
+            transaction_hashes_str=transaction_hashes_str,  # This is correct
+            merkle_root=merkle_root,
+            proposer_pubkey_hex=proposer_pubkey_hex,
+            signature=signature,
+            previous_block_hash=previous_block_hash,
+            timestamp=timestamp
+        )
 
 @dataclass
 class ProposerAnnouncement(DataClassPayload):

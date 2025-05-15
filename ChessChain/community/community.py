@@ -102,34 +102,93 @@ class ChessCommunity(Community):
         # Create genesis block with special parameters
         genesis_seed = "0000000000000000000000000000000000000000000000000000000000000000"
         genesis_time = int(time.time())
-        genesis_merkle_root = hashlib.sha256("genesis_root".encode()).hexdigest()
         
+        # Create a dummy genesis transaction hash
+        genesis_tx_hash = hashlib.sha256(f"genesis_tx_{genesis_time}".encode()).hexdigest()
+
+        # Calculate Merkle root for the genesis transaction
+        # This aligns with how Merkle roots are calculated for regular blocks
+        merkle_tree_genesis = MerkleTree([genesis_tx_hash])
+        genesis_merkle_root = merkle_tree_genesis.get_root()
+        if not genesis_merkle_root:
+            # This should not happen with a single transaction, but handle defensively
+            self.logger.error("Failed to generate Merkle root for genesis block. Using a fallback.")
+            # Fallback to a predefined hash or raise an error, depending on desired robustness
+            genesis_merkle_root = hashlib.sha256("fallback_genesis_root_error".encode()).hexdigest()
+            # Consider raising an exception here if a valid Merkle root is critical for startup
+            # raise RuntimeError("Failed to generate Merkle root for genesis block")
+
         # Sign the genesis block with our key
-        genesis_data = f"{genesis_seed}:{genesis_merkle_root}:{self.pubkey_bytes.hex()}:genesis:{genesis_time}"
-        genesis_signature = self.sk.sign(genesis_data.encode('utf-8')).hex()
-        
+        # The data signed includes the actual Merkle root of the genesis transaction
+        genesis_data_to_sign = f"{genesis_seed}:{genesis_merkle_root}:{self.pubkey_bytes.hex()}:genesis:{genesis_time}"
+        genesis_signature = self.sk.sign(genesis_data_to_sign.encode('utf-8')).hex()
+
         # Create the genesis block payload
-        genesis_block = ProposedBlockPayload(
+        genesis_block = ProposedBlockPayload.create(
             round_seed_hex=genesis_seed,
-            transaction_hashes=[],  # No transactions in genesis
+            transaction_hashes=[genesis_tx_hash],
             merkle_root=genesis_merkle_root,
             proposer_pubkey_hex=self.pubkey_bytes.hex(),
             signature=genesis_signature,
-            timestamp=genesis_time,
-            previous_block_hash="genesis"  # Special marker for genesis block
+            previous_block_hash="\x00" * 32,
+            timestamp=genesis_time
         )
+
+        # The genesis block doesn't have a previous block, so we can use a placeholder
+        # Calculate block hash using the same data that was signed
+        genesis_block_hash = hashlib.sha256(genesis_data_to_sign.encode('utf-8')).hexdigest()
         
-        # Calculate block hash
-        genesis_block_hash = hashlib.sha256(genesis_data.encode('utf-8')).hexdigest()
-        
-        # Store the genesis block
         with self.db_env.begin(db=blocks_db, write=True) as txn:
-            serialized_genesis = default_serializer.pack_serializable(genesis_block)
+            # Convert the transaction_hashes list to a string before serialization
+            # This is a temporary hack to work around the serialization issue
+            tx_hashes_str = ",".join(genesis_block.transaction_hashes)
+            
+            modified_block = ProposedBlockPayload(
+                round_seed_hex=genesis_block.round_seed_hex,
+                transaction_hashes_str=tx_hashes_str,  # Changed from transaction_hashes=[tx_hashes_str]
+                merkle_root=genesis_block.merkle_root,
+                proposer_pubkey_hex=genesis_block.proposer_pubkey_hex,
+                signature=genesis_block.signature,
+                previous_block_hash=genesis_block.previous_block_hash,
+                timestamp=genesis_block.timestamp
+            )
+            
+            serialized_genesis = default_serializer.pack_serializable(modified_block)
             txn.put(genesis_block_hash.encode('utf-8'), serialized_genesis)
-        
+
         self.logger.info(f"Initialized blockchain with genesis block {genesis_block_hash[:16]}")
 
-
+        # Create a dummy genesis transaction and store it in the database
+        try:
+            # The nonce of the genesis transaction is its hash, used in the Merkle tree
+            genesis_tx = ChessTransaction(
+                match_id="genesis_match",
+                winner="genesis",
+                moves_hash="genesis_moves", # Placeholder, as no actual moves for genesis tx
+                nonce=genesis_tx_hash, 
+                proposer_pubkey_hex=self.pubkey_bytes.hex(),
+                # Signature for the transaction itself
+                signature=self.sk.sign(f"genesis_match:genesis:{genesis_tx_hash}".encode()).hex()
+            )
+            
+            with self.db_env.begin(db=self.tx_db, write=True) as txn:
+                serialized_tx = default_serializer.pack_serializable(genesis_tx)
+                txn.put(genesis_tx_hash.encode(), serialized_tx)
+                
+            # Mark this transaction as processed immediately
+            processed_db = self.db_env.open_db(b'processed_transactions', create=True)
+            with self.db_env.begin(db=processed_db, write=True) as txn:
+                txn.put(genesis_tx_hash.encode(), b'1')
+                
+            self.transactions.add(genesis_tx_hash)
+            self.logger.info(f"Created and stored genesis transaction with hash {genesis_tx_hash[:16]}")
+            
+            # Create additional dummy transactions for initial blocks
+            self.create_dummy_transactions(3)  # Create 3 dummy transactions
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create genesis transaction: {e}")
+    
     def stake_tokens(self, amount: int) -> None:
         """Stake tokens in the system."""
         pid = self.pubkey_bytes
@@ -491,7 +550,7 @@ class ChessCommunity(Community):
                 try:
                     proposed_block = ProposedBlockPayload(
                         round_seed_hex=round_seed_hex,
-                        transaction_hashes=transaction_hashes,
+                        transaction_hashes_str=",".join(transaction_hashes),  # Changed from transaction_hashes=transaction_hashes
                         merkle_root=merkle_root,
                         proposer_pubkey_hex=proposer_pubkey_hex,
                         signature=signature_hex,
