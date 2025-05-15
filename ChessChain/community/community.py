@@ -900,7 +900,13 @@ class ChessCommunity(Community):
                 # Announce to the network
                 for p in self.get_peers():
                     if p.mid != self.pubkey_bytes:
-                        announcement = ProposerAnnouncement(seed.hex(), self.pubkey_bytes.hex())
+                        announcement = ProposerAnnouncement(
+                            round_number=self.pos_round_number,
+                            seed_hex=seed.hex(),
+                            proposer_hex=self.pubkey_bytes.hex(),
+                            round_seed_hex=seed.hex(),
+                            proposer_pubkey_hex=self.pubkey_bytes.hex()
+                        )
                         serialized = default_serializer.pack_serializable(announcement)
                         self.logger.debug(f"Sending announcement: {len(serialized)} bytes, fields: {seed.hex()[:8]}, {self.pubkey_bytes.hex()[:8]}")
                         self.ez_send(p, announcement)
