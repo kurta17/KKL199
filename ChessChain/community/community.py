@@ -170,8 +170,12 @@ class ChessCommunity(Community):
         """Handle responses to block synchronization requests."""
         self.logger.info(f"Received block sync response for {payload.request_hash[:16]} with blocks")
         
+        # Track sync response for startup sequence
+        if not hasattr(self, 'sync_responses_received'):
+            self.sync_responses_received = 0
+        self.sync_responses_received += 1
+        
         # Deserialize the blocks data
-        import json
         try:
             blocks = json.loads(payload.blocks_data)
             self.logger.info(f"Received {len(blocks)} blocks in sync response")
@@ -179,24 +183,38 @@ class ChessCommunity(Community):
             # Store the received blocks
             blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
             
+            new_blocks_count = 0
             with self.db_env.begin(db=blocks_db, write=True) as txn:
                 for block_hash, block_data_hex in blocks.items():
+                    # Skip if we already have this block
+                    if txn.get(block_hash.encode('utf-8')):
+                        continue
+                        
                     block_data = bytes.fromhex(block_data_hex)
                     txn.put(block_hash.encode('utf-8'), block_data)
+                    new_blocks_count += 1
                     
-            self.logger.info(f"Stored {len(blocks)} received blocks in database")
+            self.logger.info(f"Stored {new_blocks_count} new blocks in database")
             
-            # Try to resolve any pending forks
+            # If we received new blocks, consider sync successful
+            if new_blocks_count > 0:
+                self.sync_complete = True
+                # Update our chain head with the latest block
+                latest_hash = self.find_latest_block_hash()
+                if latest_hash:
+                    self.current_chain_head = latest_hash
+                    self.logger.info(f"Updated chain head to {latest_hash[:16]}")
+                
+            # Handle pending fork resolution if needed
             if payload.request_hash in self.pending_sync_requests:
                 fork_data = self.pending_sync_requests.pop(payload.request_hash)
                 # Re-trigger fork resolution with the new blocks
                 await self.resolve_fork_with_retry(fork_data)
-                
+                    
         except json.JSONDecodeError as e:
             self.logger.error(f"Error decoding blocks data: {e}")
         except Exception as e:
             self.logger.error(f"Error processing sync response: {e}")
-
     
     @lazy_wrapper(MoveData)
     def on_move(self, peer: Peer, payload: MoveData) -> None:
@@ -475,11 +493,102 @@ class ChessCommunity(Community):
         """Called when the community is started."""
         self.network.add_peer_observer(self)
         create_task(self.periodic_broadcast())
+        create_task(self.startup_sequence())
+    
+    async def startup_sequence(self) -> None:
+        """Handles the node startup sequence with proper synchronization."""
+        self.logger.info("Node starting up. Beginning startup sequence...")
+        
+        # Wait for peer discovery (30 seconds)
+        self.logger.info("Waiting for peer discovery (30 seconds)...")
+        peer_discovery_time = 30
+        start_time = time.time()
+        
+        while time.time() - start_time < peer_discovery_time:
+            peers = self.get_peers()
+            if peers:
+                self.logger.info(f"Found {len(peers)} peers. Continuing startup sequence.")
+                break
+            await asyncio.sleep(2)  # Check every 2 seconds
+        
+        # Check if we found any peers
+        peers = self.get_peers()
+        if not peers:
+            self.logger.warning("No peers found during discovery period. Will operate in standalone mode.")
+        else:
+            # Request blockchain data from peers
+            self.logger.info(f"Beginning blockchain synchronization with {len(peers)} peers...")
+            sync_success = await self.sync_blockchain_data()
+            
+            if sync_success:
+                self.logger.info("Blockchain synchronization completed successfully.")
+            else:
+                self.logger.warning("Blockchain synchronization incomplete or failed. Continuing with local state.")
+        
+        # Start PoS rounds only after synchronization attempt
+        self.logger.info("Starting PoS consensus rounds...")
         create_task(self.pos_round())
- 
+
+    async def sync_blockchain_data(self) -> bool:
+        """Synchronize blockchain data from peers.
+        
+        Returns:
+            bool: True if synchronization was successful, False otherwise
+        """
+        # Track if we've successfully synced
+        sync_complete = False
+        sync_timeout = 60  # 1 minute timeout for initial sync
+        
+        # Request blockchain data from peers
+        peers = self.get_peers()
+        if not peers:
+            return False
+            
+        # Create a synchronization request
+        latest_hash = self.get_latest_block_hash()
+        if not latest_hash:
+            self.logger.info("No existing blocks found. Requesting complete blockchain.")
+            request_hash = "0" * 64  # Request from genesis block
+        else:
+            self.logger.info(f"Latest known block: {latest_hash[:16]}. Requesting newer blocks.")
+            request_hash = latest_hash
+        
+        # Send sync requests to peers
+        sync_requests_sent = 0
+        for peer in peers[:3]:  # Limit to 3 peers
+            try:
+                request = BlockSyncRequest(request_hash, count=100)
+                self.ez_send(peer, request)
+                sync_requests_sent += 1
+                self.logger.info(f"Sent blockchain sync request to {peer.mid.hex()[:8]}")
+            except Exception as e:
+                self.logger.error(f"Error sending sync request to peer {peer.mid.hex()[:8]}: {e}")
+        
+        if sync_requests_sent == 0:
+            return False
+        
+        # Wait for sync responses with timeout
+        start_time = time.time()
+        self.sync_responses_received = 0
+        
+        while time.time() - start_time < sync_timeout and self.sync_responses_received < sync_requests_sent:
+            # Check if we've received responses in the on_block_sync_response handler
+            if hasattr(self, 'sync_complete') and self.sync_complete:
+                sync_complete = True
+                break
+            await asyncio.sleep(1)
+        
+        if sync_complete or self.sync_responses_received > 0:
+            self.logger.info(f"Received {self.sync_responses_received} sync responses")
+            return True
+        else:
+            self.logger.warning(f"Sync timeout reached after {sync_timeout} seconds with {self.sync_responses_received} responses")
+            return False
+
     def on_peer_added(self, peer: Peer) -> None:
         """Called when a new peer is added."""
         print("New peer:", peer)
+    
  
  
     def get_stored_transactions(self) -> List[ChessTransaction]:
