@@ -99,12 +99,17 @@ class ProposerAnnouncement(DataClassPayload):
     """Payload for a peer announcing it is the proposer for a round."""
     msg_id = PROPOSER_ANNOUNCEMENT_MSG_ID
 
-    # Include all fields from the wire format
-    round_number: int
-    seed_hex: str
-    proposer_hex: str
     round_seed_hex: str
     proposer_pubkey_hex: str
+    
+    @classmethod
+    def from_unpack_list(cls, *args):
+        # If we're getting 5 fields but only need the last 2
+        if len(args) == 5:
+            _, _, _, round_seed_hex, proposer_pubkey_hex = args
+            return cls(round_seed_hex, proposer_pubkey_hex)
+        # Normal case with just our 2 fields
+        return cls(*args)
 
 @dataclass
 class MoveData(DataClassPayload):
