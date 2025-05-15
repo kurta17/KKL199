@@ -125,6 +125,77 @@ class ChessCommunity(Community):
         # Track pending sync requests
         self.pending_sync_requests = {}
 
+    @lazy_wrapper(BlockSyncRequest)
+    async def on_block_sync_request(self, peer: Peer, payload: BlockSyncRequest) -> None:
+        """Handle requests for block synchronization."""
+        self.logger.info(f"Received block sync request for {payload.block_hash[:16]} from {peer.mid.hex()[:8]}")
+        
+        # Get the requested blocks
+        blocks = {}
+        blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
+        
+        with self.db_env.begin(db=blocks_db) as txn:
+            # Start with the requested block
+            current_hash = payload.block_hash
+            count = 0
+            
+            while current_hash and count < payload.count:
+                block_data = txn.get(current_hash.encode('utf-8'))
+                if not block_data:
+                    break
+                    
+                blocks[current_hash] = block_data.hex()
+                count += 1
+                
+                # Get the previous block hash to follow the chain backwards
+                try:
+                    block, _ = default_serializer.unpack_serializable(ProposedBlockPayload, block_data)
+                    current_hash = block.previous_block_hash
+                except Exception as e:
+                    self.logger.error(f"Error deserializing block during sync: {e}")
+                    break
+        
+        # Serialize the blocks data as JSON
+        import json
+        blocks_data = json.dumps(blocks)
+        
+        # Send the response
+        response = BlockSyncResponse(payload.block_hash, blocks_data)
+        self.ez_send(peer, response)
+        self.logger.info(f"Sent {len(blocks)} blocks in sync response to {peer.mid.hex()[:8]}")
+
+    @lazy_wrapper(BlockSyncResponse) 
+    async def on_block_sync_response(self, peer: Peer, payload: BlockSyncResponse) -> None:
+        """Handle responses to block synchronization requests."""
+        self.logger.info(f"Received block sync response for {payload.request_hash[:16]} with blocks")
+        
+        # Deserialize the blocks data
+        import json
+        try:
+            blocks = json.loads(payload.blocks_data)
+            self.logger.info(f"Received {len(blocks)} blocks in sync response")
+            
+            # Store the received blocks
+            blocks_db = self.db_env.open_db(b'confirmed_blocks', create=True)
+            
+            with self.db_env.begin(db=blocks_db, write=True) as txn:
+                for block_hash, block_data_hex in blocks.items():
+                    block_data = bytes.fromhex(block_data_hex)
+                    txn.put(block_hash.encode('utf-8'), block_data)
+                    
+            self.logger.info(f"Stored {len(blocks)} received blocks in database")
+            
+            # Try to resolve any pending forks
+            if payload.request_hash in self.pending_sync_requests:
+                fork_data = self.pending_sync_requests.pop(payload.request_hash)
+                # Re-trigger fork resolution with the new blocks
+                await self.resolve_fork_with_retry(fork_data)
+                
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Error decoding blocks data: {e}")
+        except Exception as e:
+            self.logger.error(f"Error processing sync response: {e}")
+
     
     @lazy_wrapper(MoveData)
     def on_move(self, peer: Peer, payload: MoveData) -> None:
