@@ -26,7 +26,7 @@ class ChessCommunity(Community):
     community_id = b'chess_platform123456'
 
     INITIAL_STAKE = 120
-    POS_ROUND_INTERVAL = 30
+    POS_ROUND_INTERVAL = 20
     MIN_STAKE = 10
 
     def __init__(self, settings: CommunitySettings) -> None:
@@ -324,10 +324,40 @@ class ChessCommunity(Community):
         """Check if a transaction with the given nonce exists in the LMDB database."""
         with self.db_env.begin(db=self.tx_db, write=False) as txn:
             return txn.get(nonce.encode('utf-8')) is not None
-
-    def checking_proposer(self, seed: bytes) -> bytes:
-        """Peer is checking if it is the proposer for a given seed."""
-        return lottery_selection(seed_plus_id=seed + self.pubkey_bytes, my_stake=self.stakes[self.pubkey_bytes], total_stake=self.total_stake())
+        
+        
+    def checking_proposer(self, seed: bytes) -> bool:
+        """Check if this peer is the proposer for the current round.
+        
+        Args:
+            seed: The round seed
+        
+        Returns:
+            bool: True if this peer is the proposer, False otherwise
+        """
+        # Get list of peer IDs for the lottery
+        peer_ids = []
+        for peer in self.get_peers():
+            if peer.mid != self.pubkey_bytes:  # Don't include self twice
+                peer_ids.append(peer.mid.hex())
+        
+        # Include self in the peer list
+        peer_ids.append(self.pubkey_bytes.hex())
+        
+        # Call the lottery selection function with appropriate parameters
+        is_proposer = lottery_selection(
+            seed=seed,
+            p_id=self.pubkey_bytes,
+            total_stake=self.total_stake(),
+            peers=peer_ids
+        )
+        
+        if is_proposer:
+            self.logger.info(f"I am the proposer for round with seed {seed.hex()[:8]}")
+        else:
+            self.logger.info(f"I am NOT the proposer for round with seed {seed.hex()[:8]}")
+        
+        return is_proposer
 
     def started(self) -> None:
         """Called when the community is started."""
@@ -587,7 +617,7 @@ class ChessCommunity(Community):
                 print(f"Stake too low ({self.stakes[self.pubkey_bytes]}), not proposing")
                 await sleep(self.POS_ROUND_INTERVAL)
                 continue
-
+            
             # check if we are the proposer
             proposer = self.checking_proposer(seed)
             if proposer:

@@ -25,24 +25,44 @@ def check_port(port: int) -> bool:
             return False
 
 
-# In utils/utils.py:
-def lottery_selection(seed_plus_id: bytes, my_stake: int, total_stake: int) -> bool:
+def lottery_selection(seed: bytes, p_id: bytes, total_stake: int, peers: List[str]) -> bool:
     """Lottery-based random selection based on stake.
     
     Args:
-        seed_plus_id: Combined seed and validator ID
-        my_stake: Stake of the participant
+        seed: The round seed
+        p_id: Participant ID (public key bytes)
         total_stake: Total stake in the system
+        peers: List of peer IDs to compare against
         
     Returns:
         bool: True if the participant is selected, False otherwise
     """
     # Generate a deterministic random number from the seed + ID
+    seed_plus_id = seed + p_id
     hash_value = hashlib.sha256(seed_plus_id).digest()
-    random_value = int.from_bytes(hash_value, 'big') / 2**256  # Normalize to [0,1)
+    # Convert the hash to an integer
+    my_val = int.from_bytes(hash_value, 'big')
+
+    # Find the peer with the lowest hash value (winner)
+    winner_peer_id = p_id
+    lowest_val = my_val
     
-    # Calculate probability of selection based on stake
-    selection_probability = my_stake / total_stake if total_stake > 0 else 0
+    for peer_id in peers:
+        # Convert string peer ID to bytes if needed
+        peer_bytes = peer_id if isinstance(peer_id, bytes) else peer_id.encode()
+        curr_val = int.from_bytes(hashlib.sha256(seed + peer_bytes).digest(), 'big')
+        
+        if curr_val < lowest_val:
+            lowest_val = curr_val
+            winner_peer_id = peer_bytes
     
-    # Select if the random value is less than the selection probability
-    return random_value < selection_probability
+    # Check if current peer is the winner
+    is_winner = winner_peer_id == p_id
+    
+    if is_winner:
+        print(f"Peer {p_id.hex()[:8]} won the lottery!")
+    else:
+        winner_id_hex = winner_peer_id.hex() if isinstance(winner_peer_id, bytes) else winner_peer_id
+        print(f"Peer {p_id.hex()[:8]} lost the lottery, winner is {winner_id_hex[:8]}")
+    
+    return is_winner
