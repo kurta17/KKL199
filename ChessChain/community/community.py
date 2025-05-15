@@ -243,7 +243,7 @@ class ChessCommunity(Community):
             for key, raw in cursor:
                 try:
                     key_str = key.decode()
-                    if key_str.startswith(f"{match_id}:"):
+                    if key_str.startswith(f"{match_id}_"):
                         deserialized_move, _ = default_serializer.unpack_serializable(MoveData, raw)
                         out.append(deserialized_move)
                 except UnicodeDecodeError:
