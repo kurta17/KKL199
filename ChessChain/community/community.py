@@ -26,7 +26,7 @@ class ChessCommunity(Community):
     community_id = b'chess_platform123456'
 
     INITIAL_STAKE = 120
-    POS_ROUND_INTERVAL = 60
+    POS_ROUND_INTERVAL = 30
     MIN_STAKE = 10
 
     def __init__(self, settings: CommunitySettings) -> None:
@@ -380,7 +380,7 @@ class ChessCommunity(Community):
                     if p.mid != self.pubkey_bytes and (p.mid, tx.nonce) not in self.sent:
                         self.ez_send(p, tx)
                         self.sent.add((p.mid, tx.nonce))
-            await sleep(1)
+            await sleep(5)
  
     def send_transaction(self, tx: ChessTransaction) -> None:
         """Send a verified transaction to peers."""
@@ -594,7 +594,10 @@ class ChessCommunity(Community):
                 # Announce to the network
                 for p in self.get_peers():
                     if p.mid != self.pubkey_bytes:
-                        self.ez_send(p, ProposerAnnouncement(seed.hex(), self.pubkey_bytes.hex()))
+                        announcement = ProposerAnnouncement(seed.hex(), self.pubkey_bytes.hex())
+                        serialized = default_serializer.pack_serializable(announcement)
+                        self.logger.debug(f"Sending announcement: {len(serialized)} bytes, fields: {seed.hex()[:8]}, {self.pubkey_bytes.hex()[:8]}")
+                        self.ez_send(p, announcement)
                 self.logger.info(f"Announced proposer for round {seed.hex()[:8]}: {self.pubkey_bytes.hex()[:8]}")
 
                 # Fetch only unprocessed transactions from storage
