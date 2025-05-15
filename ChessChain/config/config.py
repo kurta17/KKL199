@@ -26,7 +26,7 @@ def create_ipv8_config(port: int = 8000) -> Dict[str, Any]:
     builder.add_key("my peer", "medium", "chess_peer_key.pem")
     builder.add_overlay(
         "ChessCommunity", "my peer",
-        [WalkerDefinition(Strategy.RandomWalk, 5, {"timeout": 5.0})],
+        [WalkerDefinition(Strategy.RandomWalk, 5, {"timeout": 1.0})],
         default_bootstrap_defs,
         {},
         [('started',)]

@@ -25,7 +25,7 @@ class ChessCommunity(Community):
     community_id = b'chess_platform123456'
 
     INITIAL_STAKE = 120
-    POS_ROUND_INTERVAL = 15
+    POS_ROUND_INTERVAL = 60
     MIN_STAKE = 10
 
     def __init__(self, settings: CommunitySettings) -> None:
@@ -262,7 +262,7 @@ class ChessCommunity(Community):
                     if p.mid != self.pubkey_bytes and (p.mid, tx.nonce) not in self.sent:
                         self.ez_send(p, tx)
                         self.sent.add((p.mid, tx.nonce))
-            await sleep(5)
+            await sleep(1)
  
     def send_transaction(self, tx: ChessTransaction) -> None:
         """Send a verified transaction to peers."""
