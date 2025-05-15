@@ -28,6 +28,8 @@ from community.community import ChessCommunity
 from utils.interface import manual_send_loop
 
 
+
+
 async def start_communities(port: int = 8000) -> None:
     """Start the chess community.
     

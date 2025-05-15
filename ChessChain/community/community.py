@@ -6,6 +6,7 @@ from asyncio import create_task, sleep
 from typing import Dict, List, Set, Tuple
 from ipv8.lazy_community import lazy_wrapper
 from cryptography.exceptions import InvalidSignature 
+from models.models import BlockSyncRequest, BlockSyncResponse
 
 import asyncio
 import lmdb
@@ -18,6 +19,32 @@ from ipv8.messaging.serialization import default_serializer
 from models.models import ChessTransaction, MoveData, ProposedBlockPayload, ProposerAnnouncement
 from utils.utils import lottery_selection
 from utils.merkle import MerkleTree
+from ipv8.messaging.payload_dataclass import DataClassPayload, Serializable
+
+class BlockSyncRequest(Serializable):
+    """Request blocks from a given hash."""
+    format_list = ['varlenH', 'I']
+    
+    def __init__(self, block_hash: str, count: int = 10):
+        self.block_hash = block_hash
+        self.count = count
+    
+    @classmethod
+    def from_unpack_list(cls, block_hash: str, count: int):
+        return BlockSyncRequest(block_hash, count)
+
+class BlockSyncResponse(Serializable):
+    """Response to a block sync request containing serialized blocks."""
+    format_list = ['varlenH', 'varlenH'] 
+    
+    def __init__(self, request_hash: str, blocks_data: str):
+        self.request_hash = request_hash
+        self.blocks_data = blocks_data
+        
+    @classmethod
+    def from_unpack_list(cls, request_hash: str, blocks_data: str):
+        return BlockSyncResponse(request_hash, blocks_data)
+
 
 
 class ChessCommunity(Community):
@@ -90,6 +117,13 @@ class ChessCommunity(Community):
 
         self.current_chain_head = None
         self.initialize_blockchain()
+
+            # Add handlers for block synchronization
+        self.add_message_handler(BlockSyncRequest, self.on_block_sync_request)
+        self.add_message_handler(BlockSyncResponse, self.on_block_sync_response)
+        
+        # Track pending sync requests
+        self.pending_sync_requests = {}
 
     
     @lazy_wrapper(MoveData)
