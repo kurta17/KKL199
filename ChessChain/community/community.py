@@ -34,7 +34,9 @@ class ChessCommunity(Community):
     INITIAL_STAKE = 120
     POS_ROUND_INTERVAL = 20
     MIN_STAKE = 10
-
+    MAX_BLOCK_AGE = 3600  # 1 hour
+    SYNC_TIMEOUT = 60     # 1 minute
+    
     def __init__(self, settings: CommunitySettings) -> None:
         """Initialize the chess community."""
         super().__init__(settings)
@@ -104,9 +106,6 @@ class ChessCommunity(Community):
         # Track pending sync requests
         self.pending_sync_requests = {}
 
-
-    MAX_BLOCK_AGE = 3600  # 1 hour
-    SYNC_TIMEOUT = 60     # 1 minute
 
     async def resolve_fork_with_retry(self, block: ProposedBlockPayload) -> bool:
         """Resolve a fork with block synchronization if needed."""
@@ -495,9 +494,9 @@ class ChessCommunity(Community):
         """Handles the node startup sequence with proper synchronization."""
         self.logger.info("Node starting up. Beginning startup sequence...")
         
-        # Wait for peer discovery (30 seconds)
-        self.logger.info("Waiting for peer discovery (30 seconds)...")
-        peer_discovery_time = 30
+        # Wait for peer discovery (50 seconds)
+        self.logger.info("Waiting for peer discovery (50 seconds)...")
+        peer_discovery_time = 50
         start_time = time.time()
         
         while time.time() - start_time < peer_discovery_time:
@@ -916,7 +915,7 @@ class ChessCommunity(Community):
         self.logger.warning("Fork detected! Attempting to resolve...")
 
         # Validate block age
-        if abs(time.time() - proposed_block.timestamp) > MAX_BLOCK_AGE:
+        if abs(time.time() - proposed_block.timestamp) > self.MAX_BLOCK_AGE:
             self.logger.warning(f"Proposed block is too old (timestamp: {proposed_block.timestamp}). Rejecting.")
             return False
 

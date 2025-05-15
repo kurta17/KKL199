@@ -102,6 +102,8 @@ class ProposerAnnouncement(DataClassPayload):
     round_seed_hex: str
     proposer_pubkey_hex: str
     
+    format_list = ['varlenH', 'varlenH']  # <-- Add this line
+
     @classmethod
     def from_unpack_list(cls, *args):
         # Always extract the last two arguments as the fields
