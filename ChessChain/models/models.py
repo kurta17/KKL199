@@ -28,7 +28,7 @@ class BlockSyncRequest(Serializable):
     
     def to_pack_list(self):
         """Convert this request to a serializable format."""
-        return [('varlenH', self.block_hash),
+        return [('varlenH', self.block_hash.encode('utf-8')),  # Encode string to bytes
                 ('I', self.count)]
     
 
