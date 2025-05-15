@@ -31,10 +31,9 @@ class BlockSyncRequest(Serializable):
         return [('varlenH', self.block_hash.encode('utf-8')),  # Encode string to bytes
                 ('I', self.count)]
     
-
     @classmethod
-    def from_unpack_list(cls, block_hash: str, count: int):
-        return BlockSyncRequest(block_hash, count)
+    def from_unpack_list(cls, block_hash: bytes, count: int):
+        return BlockSyncRequest(block_hash.decode('utf-8'), count)
 
 class BlockSyncResponse(Serializable):
     """Response to a block sync request containing serialized blocks."""
@@ -48,12 +47,12 @@ class BlockSyncResponse(Serializable):
 
     def to_pack_list(self):
         """Convert this response to a serializable format."""
-        return [('varlenH', self.request_hash),
-                ('varlenH', self.blocks_data)]
+        return [('varlenH', self.request_hash.encode('utf-8')),  # Encode string to bytes
+                ('varlenH', self.blocks_data.encode('utf-8'))]  # Encode string to bytes
  
     @classmethod
-    def from_unpack_list(cls, request_hash: str, blocks_data: str):
-        return BlockSyncResponse(request_hash, blocks_data)
+    def from_unpack_list(cls, request_hash: bytes, blocks_data: bytes):
+        return BlockSyncResponse(request_hash.decode('utf-8'), blocks_data.decode('utf-8'))
 
 
 @dataclass
