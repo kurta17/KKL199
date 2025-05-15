@@ -865,7 +865,7 @@ class ChessCommunity(Community):
                 chain.append(current_hash)
                 
                 try:
-                    block = default_serializer.unpack_serializable(ProposedBlockPayload, block_data)
+                    block, _ = default_serializer.unpack_serializable(ProposedBlockPayload, block_data)
                     current_hash = block.previous_block_hash
                     
                     # Stop at genesis block
