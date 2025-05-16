@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ethers } from 'ethers';
+import nacl from 'tweetnacl';
+import base64js from 'base64-js';
 import { authAPI } from './services/api';
 
 function Register() {
@@ -23,16 +24,23 @@ function Register() {
     }
   }, [navigate]);
 
-  // Generate crypto keypair
+  // Generate Ed25519 keypair
   useEffect(() => {
     try {
-      const wallet = ethers.Wallet.createRandom();
-      console.log('Generated private key:', wallet.privateKey);
-      console.log('Generated public key (address):', wallet.address);
-      setPrivateKey(wallet.privateKey);
-      setPublicKey(wallet.address);
+      // Generate a new Ed25519 keypair
+      const keyPair = nacl.sign.keyPair();
+      
+      // Convert the keys to base64 for storage
+      const privateKeyBase64 = base64js.fromByteArray(keyPair.secretKey);
+      const publicKeyBase64 = base64js.fromByteArray(keyPair.publicKey);
+      
+      console.log('Generated Ed25519 private key (base64):', privateKeyBase64);
+      console.log('Generated Ed25519 public key (base64):', publicKeyBase64);
+      
+      setPrivateKey(privateKeyBase64);
+      setPublicKey(publicKeyBase64);
     } catch (error) {
-      console.error('Error generating keys:', error);
+      console.error('Error generating Ed25519 keys:', error);
     }
   }, []);
 
@@ -73,8 +81,14 @@ function Register() {
         email,
         password,
         publicKey
-      };
-      console.log('Registration payload:', registrationData);
+      };        console.log('Registration payload:', {
+          ...registrationData,
+          publicKey: registrationData.publicKey.substring(0, 10) + '...' // Only show part of the key for security
+        });
+      
+      // Store private key in localStorage BEFORE registration attempt
+      // This way we have the key even if the user refreshes later
+      localStorage.setItem('userPrivateKey', privateKey);
       
       let response = await authAPI.register(registrationData);
       console.log('Registration response:', response);

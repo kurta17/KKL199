@@ -400,6 +400,18 @@ export class GameSocket {
   // Connect to WebSocket server with improved stability
   connect() {
     try {
+      // Check if WebSocket API is available
+      if (typeof WebSocket === 'undefined') {
+        console.error('WebSocket API is not available in this browser');
+        if (this.onErrorHandler) {
+          this.onErrorHandler({ message: 'WebSocket is not supported in this browser. Please try using a modern browser like Chrome, Firefox, Safari, or Edge.' });
+        }
+        return;
+      }
+      
+      // Log browser information to help with debugging
+      console.log('Browser: ' + navigator.userAgent);
+      
       // Close existing connection if any
       if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
         this.clearPingPong();
@@ -412,7 +424,22 @@ export class GameSocket {
       
       // Create new WebSocket connection
       console.log('Creating new WebSocket connection');
+      
+      // Use the simple, direct approach that works in the test directory
+      console.log('Using direct WebSocket connection to localhost:5000');
       this.socket = new WebSocket('ws://localhost:5000');
+      
+      // Store the URL in our custom property for reference
+      this.currentUrl = 'ws://localhost:5000';
+      
+      // For debugging and reference, keep track of fallback URLs if needed later
+      this.wsUrls = [
+        'ws://localhost:5000',
+        'ws://127.0.0.1:5000'
+      ];
+      this.currentUrlIndex = 0;
+      
+      console.log('WebSocket constructor successfully called');
       this.pingInterval = null;
       this.pingTimeout = null;
 
@@ -433,6 +460,15 @@ export class GameSocket {
         if (userId) {
           console.log(`Authenticating user: ${userId}`);
           this.authenticate(userId);
+          
+          // Check if the user was in queue before disconnect
+          setTimeout(() => {
+            const wasInQueue = localStorage.getItem('inMatchmakingQueue') === 'true';
+            if (wasInQueue) {
+              console.log('Detected user was previously in queue - auto-rejoining');
+              this.joinQueue();
+            }
+          }, 1000); // Wait 1 second after auth to rejoin queue
         } else {
           console.warn('No user ID found in localStorage');
         }
@@ -537,7 +573,7 @@ export class GameSocket {
     }, 10000);
   }
   
-  // Clear all ping/pong timers
+  // Clear all ping/pong and keepalive timers
   clearPingPong() {
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
@@ -548,15 +584,46 @@ export class GameSocket {
       clearTimeout(this.pingTimeout);
       this.pingTimeout = null;
     }
+    
+    if (this.keepaliveInterval) {
+      clearInterval(this.keepaliveInterval);
+      this.keepaliveInterval = null;
+    }
   }
 
   // Authenticate with the WebSocket server
   authenticate(userId) {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({
-        type: 'authenticate',
-        userId,
-      }));
+      try {
+        console.log(`Sending authentication for user ${userId}`);
+        
+        const authMessage = {
+          type: 'authenticate',
+          userId: userId,
+          token: localStorage.getItem('userToken'), // Add token for extra security
+          timestamp: Date.now()
+        };
+        
+        this.socket.send(JSON.stringify(authMessage));
+        console.log('Authentication message sent successfully');
+        
+        // Set a flag so we don't try to authenticate too many times
+        this.hasAuthenticated = true;
+      } catch (error) {
+        console.error('Error sending authentication:', error);
+        
+        // Try again after a short delay
+        setTimeout(() => {
+          if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({
+              type: 'authenticate',
+              userId
+            }));
+          }
+        }, 500);
+      }
+    } else {
+      console.warn(`Socket not ready for authentication (state: ${this.socket ? this.socket.readyState : 'undefined'})`);
     }
   }
 
@@ -566,6 +633,9 @@ export class GameSocket {
       this.socket.send(JSON.stringify({
         type: 'joinQueue',
       }));
+      
+      // Store queue status in localStorage to recover on reconnect
+      localStorage.setItem('inMatchmakingQueue', 'true');
     }
   }
 

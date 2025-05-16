@@ -96,8 +96,29 @@ async def submit_move(move_request: MoveRequest):
         raise HTTPException(status_code=503, detail="Blockchain not initialized")
     
     try:
-        # Extract public key from hex format
-        public_key_bytes = bytes.fromhex(move_request.player_public_key.replace("0x", ""))
+        # Check if public key is in base64 or hex format
+        public_key_bytes = None
+        signature_bytes = None
+        
+        # Try base64 decode first
+        if '=' in move_request.player_public_key or not all(c in '0123456789abcdefABCDEF' for c in move_request.player_public_key.replace('0x', '')):
+            try:
+                public_key_bytes = base64.b64decode(move_request.player_public_key)
+                signature_bytes = base64.b64decode(move_request.signature)
+                print("Using base64 decoded keys for move submission")
+            except Exception as e:
+                print(f"Base64 decode failed: {e}")
+        
+        # Try hex decode if base64 failed
+        if public_key_bytes is None:
+            try:
+                public_key_bytes = bytes.fromhex(move_request.player_public_key.replace("0x", ""))
+                signature_bytes = bytes.fromhex(move_request.signature.replace("0x", ""))
+                print("Using hex decoded keys for move submission")
+            except Exception as e:
+                print(f"Hex decode failed: {e}")
+                raise HTTPException(status_code=400, detail=f"Invalid key format: {str(e)}")
+        
         public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
         
         # Create the move data
@@ -112,7 +133,6 @@ async def submit_move(move_request: MoveRequest):
         
         # Verify signature
         message_bytes = json.dumps(move_data, sort_keys=True).encode('utf-8')
-        signature_bytes = bytes.fromhex(move_request.signature.replace("0x", ""))
         
         # Verify signature
         try:
@@ -143,21 +163,50 @@ async def submit_move(move_request: MoveRequest):
 
 @app.post("/verify", response_model=VerifyResponse)
 async def verify_signature(verify_request: VerifyRequest):
-    """Verify a move signature"""
+    """Verify a move signature using Ed25519"""
     try:
-        # Extract public key from hex format
-        public_key_bytes = bytes.fromhex(verify_request.public_key.replace("0x", ""))
-        public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
-        
         # Convert move data to bytes
-        message_bytes = json.dumps(verify_request.move_data, sort_keys=True).encode('utf-8')
-        signature_bytes = bytes.fromhex(verify_request.signature.replace("0x", ""))
+        message_string = json.dumps(verify_request.move_data, sort_keys=True)
+        message_bytes = message_string.encode('utf-8')
         
-        # Verify signature
+        # Process signature
         try:
-            public_key.verify(signature_bytes, message_bytes)
-            return {"valid": True}
-        except InvalidSignature:
+            # Check if signature is in base64 or hex format
+            signature_bytes = None
+            public_key_bytes = None
+            
+            # Try base64 decode first
+            if '=' in verify_request.signature or not all(c in '0123456789abcdefABCDEF' for c in verify_request.signature.replace('0x', '')):
+                try:
+                    signature_bytes = base64.b64decode(verify_request.signature)
+                    public_key_bytes = base64.b64decode(verify_request.public_key)
+                    print("Using base64 decoded keys")
+                except Exception as e:
+                    print(f"Base64 decode failed: {e}")
+            
+            # Try hex decode if base64 failed
+            if signature_bytes is None:
+                try:
+                    signature_bytes = bytes.fromhex(verify_request.signature.replace('0x', ''))
+                    public_key_bytes = bytes.fromhex(verify_request.public_key.replace('0x', ''))
+                    print("Using hex decoded keys")
+                except Exception as e:
+                    print(f"Hex decode failed: {e}")
+                    return {"valid": False}
+            
+            # Load the Ed25519 public key
+            public_key_obj = Ed25519PublicKey.from_public_bytes(public_key_bytes)
+            
+            # Verify signature
+            try:
+                public_key_obj.verify(signature_bytes, message_bytes)
+                return {"valid": True}
+            except InvalidSignature:
+                print("Ed25519 signature verification failed")
+                return {"valid": False}
+                
+        except Exception as e:
+            print(f"Ed25519 signature processing error: {e}")
             return {"valid": False}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error verifying signature: {str(e)}")

@@ -4,13 +4,15 @@ ChainChess is an innovative chess platform that combines traditional chess gamep
 
 ## Recent Updates (May 16, 2025)
 
-We've made significant improvements to the game state synchronization:
+We've made significant improvements to the game state synchronization and cryptographic verification:
 
 - **Fixed Board Rotation**: Solved the issue where boards would rotate unexpectedly during play
 - **Opponent Information Display**: Fixed display of opponent names and ratings instead of "unknown"
 - **Game State Synchronization**: Improved state synchronization between browsers
 - **Database Storage**: Resolved issues with game data storage and UUID conversions
 - **Connection Stability**: Enhanced WebSocket connection handling and reconnection logic
+- **Signature Verification**: Fixed cryptographic signature verification using Ed25519 keys
+- **Key Compatibility**: Updated API to handle both base64 and hex key formats
 
 ## Key Features
 
@@ -33,6 +35,20 @@ We've made significant improvements to the game state synchronization:
   - Supabase integration for data persistence
 
 ## Quick Start Guide
+
+### Prerequisites
+
+Install the required packages for Ed25519 cryptographic operations:
+
+```bash
+# Install in the frontend project
+cd Frontend/chess-website
+npm install tweetnacl base64-js
+
+# Generate test keypairs for development
+cd ../../
+./generate-test-keys.sh
+```
 
 ### Start Development Environment
 

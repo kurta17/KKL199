@@ -42,6 +42,13 @@ function Login() {
         localStorage.setItem('userName', response.user.username);
         localStorage.setItem('userPublicKey', response.user.publicKey);
         
+        // If private key was stored during registration, it should be in localStorage already
+        // We don't retrieve it from the server for security reasons
+        const privateKey = localStorage.getItem('userPrivateKey');
+        if (!privateKey) {
+          console.warn('No private key found in localStorage. Signature verification will not work.');
+        }
+        
         // Redirect to game page
         navigate('/game');
       } else {

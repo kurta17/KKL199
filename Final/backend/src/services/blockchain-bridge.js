@@ -115,8 +115,8 @@ function stopBlockchainNode() {
  * Submit a move to the blockchain
  * @param {Object} params - The move parameters
  * @param {Object} params.moveData - The move data
- * @param {string} params.signature - The signature of the move
- * @param {string} params.publicKey - The player's public key 
+ * @param {string} params.signature - The base64 signature of the move
+ * @param {string} params.publicKey - The player's base64 public key 
  */
 async function submitMove({ moveData, signature, publicKey }) {
   try {
@@ -136,7 +136,12 @@ async function submitMove({ moveData, signature, publicKey }) {
       signature: signature
     };
     
-    console.log('Submitting move to blockchain:', JSON.stringify(blockchainMoveData));
+    // Log submission (exclude full signature for security)
+    console.log('Submitting move to blockchain:', {
+      ...blockchainMoveData,
+      signature: signature.substring(0, 10) + '...',
+      player_public_key: publicKey.substring(0, 10) + '...'
+    });
     
     const response = await axios.post(
       `${BLOCKCHAIN_API_URL}/moves`, 

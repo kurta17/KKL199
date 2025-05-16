@@ -2,7 +2,12 @@
 const activeUsers = new Map(); // userId -> websocket connection
 const matchmakingQueue = []; // array of users waiting for match
 const activeMatches = new Map(); // matchId -> match object
+const queueJoinTimes = new Map(); // userId -> timestamp when they joined the queue
+const disconnectedUsers = new Map(); // userId -> {timestamp, wasInQueue} - track recently disconnected users
 const { submitMove, verifyMoveSignature } = require('../services/blockchain-bridge');
+
+// How long to keep users in the queue after disconnect (30 seconds)
+const QUEUE_GRACE_PERIOD_MS = 30000;
 
 /**
  * Sets up the WebSocket server handlers
@@ -24,6 +29,13 @@ function setupWebSocket(wss) {
     // Handle incoming messages
     ws.on('message', (message) => {
       try {
+        // Handle keepalive messages (special case for browser compatibility)
+        if (message === 'keepalive') {
+          // Just respond with a similar message to keep the connection alive
+          ws.send('keepalive-ack');
+          return;
+        }
+        
         const data = JSON.parse(message);
         
         // Log incoming message (excluding sensitive data)
@@ -45,6 +57,16 @@ function setupWebSocket(wss) {
           case 'authenticate':
             handleAuth(ws, data.userId);
             userId = data.userId;
+            
+            // Check if this user was previously in the queue when they disconnected
+            const disconnectInfo = disconnectedUsers.get(userId);
+            if (disconnectInfo && disconnectInfo.wasInQueue && 
+                Date.now() - disconnectInfo.timestamp < QUEUE_GRACE_PERIOD_MS) {
+              console.log(`User ${userId} reconnected within grace period, auto-rejoin queue`);
+              // Auto-rejoin queue
+              handleJoinQueue(ws, userId);
+              disconnectedUsers.delete(userId);
+            }
             break;
           case 'joinQueue':
             handleJoinQueue(ws, userId || data.userId);
@@ -90,7 +112,7 @@ function setupWebSocket(wss) {
 
     // Handle client disconnect
     ws.on('close', (code, reason) => {
-      console.log(`Client disconnected. User ID: ${userId || 'unknown'}, Code: ${code}, Reason: ${reason || 'No reason provided'}`);
+      console.log(`Client disconnected. User ID: ${userId || 'unknown'}, Code: ${code}, Reason: ${reason || ''}`);
       clearInterval(pingInterval);
       if (userId) {
         handleDisconnect(userId);
@@ -100,16 +122,48 @@ function setupWebSocket(wss) {
 
   // Set up periodic matchmaking checks
   setInterval(checkMatchmaking, 5000);
+  
+  // Clean up stale disconnected users
+  setInterval(cleanupDisconnectedUsers, 60000);
 }
 
 /**
  * Handle user authentication on WebSocket
  */
 function handleAuth(ws, userId) {
-  if (!userId) return;
+  if (!userId) {
+    console.log('Received authentication request with no userId');
+    ws.send(JSON.stringify({ type: 'error', message: 'No userId provided for authentication' }));
+    return;
+  }
   
+  // Check if user was already connected
+  const existingConnection = activeUsers.get(userId);
+  if (existingConnection && existingConnection !== ws) {
+    console.log(`User ${userId} already has an active connection, replacing it`);
+    try {
+      // Try to gracefully close the old connection
+      existingConnection.send(JSON.stringify({ 
+        type: 'warning', 
+        message: 'Your account connected from another location' 
+      }));
+      existingConnection.close();
+    } catch (err) {
+      console.log(`Error closing previous connection for ${userId}:`, err.message);
+    }
+  }
+  
+  // Set the new connection
   activeUsers.set(userId, ws);
-  console.log(`User ${userId} authenticated on WebSocket`);
+  console.log(`User ${userId} authenticated on WebSocket from ${ws._socket?.remoteAddress || 'unknown IP'}`);
+  console.log(`Current active users: ${activeUsers.size} [${Array.from(activeUsers.keys()).join(', ')}]`);
+  
+  // Send confirmation to the client
+  ws.send(JSON.stringify({ 
+    type: 'authenticated', 
+    message: 'Successfully authenticated',
+    userId: userId
+  }));
 }
 
 /**
@@ -117,42 +171,95 @@ function handleAuth(ws, userId) {
  */
 function handleJoinQueue(ws, userId) {
   if (!userId) {
+    console.log('User attempted to join queue without authentication');
     ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated' }));
     return;
   }
   
   // Check if user is already in queue
   if (matchmakingQueue.includes(userId)) {
+    console.log(`User ${userId} already in matchmaking queue, ignoring duplicate request`);
+    ws.send(JSON.stringify({ type: 'queueJoined', message: 'Already in queue' }));
     return;
+  }
+  
+  // Verify the user's connection is still active
+  const connection = activeUsers.get(userId);
+  if (!connection || connection !== ws) {
+    console.log(`User ${userId} has mismatched WebSocket connection, updating connection`);
+    activeUsers.set(userId, ws);
   }
   
   // Add user to queue
   matchmakingQueue.push(userId);
-  console.log(`User ${userId} joined matchmaking queue`);
-  ws.send(JSON.stringify({ type: 'queueJoined' }));
+  queueJoinTimes.set(userId, Date.now()); // Record the time joined
+  console.log(`User ${userId} joined matchmaking queue (${matchmakingQueue.length} total in queue)`);
+  ws.send(JSON.stringify({ type: 'queueJoined', message: 'Successfully joined queue' }));
+  
+  // Log current state of matchmaking queue
+  console.log(`Current matchmaking queue: [${matchmakingQueue.join(', ')}]`);
 }
 
 /**
- * Check for potential matches between players in queue
+ * Check for potential matches between players in queue with improved stability
  */
 function checkMatchmaking() {
-  if (matchmakingQueue.length < 2) return;
+  if (matchmakingQueue.length < 2) {
+    if (matchmakingQueue.length > 0) {
+      console.log(`Matchmaking queue has ${matchmakingQueue.length} players: [${matchmakingQueue.join(', ')}]`);
+    }
+    return;
+  }
   
-  // Create matches from queue in FIFO order
-  while (matchmakingQueue.length >= 2) {
-    const user1Id = matchmakingQueue.shift();
-    const user2Id = matchmakingQueue.shift();
+  console.log(`Checking matchmaking with ${matchmakingQueue.length} players in queue: [${matchmakingQueue.join(', ')}]`);
+  
+  // Make a copy of the queue to avoid race conditions during processing
+  const currentQueue = [...matchmakingQueue];
+  
+  // First pass: check for active users and create potential match pairs
+  const activePlayers = currentQueue.filter(userId => {
+    const isActive = activeUsers.has(userId) && activeUsers.get(userId).readyState === 1; // WebSocket.OPEN
+    if (!isActive) {
+      console.log(`User ${userId} in queue but not currently active (might reconnect shortly)`);
+    }
+    return isActive;
+  });
+  
+  console.log(`Active players in queue: ${activePlayers.length} out of ${currentQueue.length}`);
+  
+  if (activePlayers.length >= 2) {
+    console.log(`Found enough active players to create a match`);
     
+    // Create matches from queue in FIFO order, but checking active status
+    // Use a temporary array to track users we've processed
+    const processedUsers = [];
+    
+    // Get the first two active users
+    const user1Id = activePlayers[0];
+    const user2Id = activePlayers[1];
+    
+    console.log(`Attempting to match users: ${user1Id} and ${user2Id}`);
+    processedUsers.push(user1Id, user2Id);
+    
+    // Verify connections are still active
     const user1Connection = activeUsers.get(user1Id);
     const user2Connection = activeUsers.get(user2Id);
     
-    // Skip if either user disconnected
-    if (!user1Connection || !user2Connection) {
-      // Put active user back in queue
-      if (user1Connection) matchmakingQueue.push(user1Id);
-      if (user2Connection) matchmakingQueue.push(user2Id);
-      continue;
+    // Skip if either user disconnected during processing
+    if (!user1Connection || !user2Connection || 
+        user1Connection.readyState !== 1 || user2Connection.readyState !== 1) {
+      console.log(`User connection check failed - User1: ${user1Connection?.readyState === 1}, User2: ${user2Connection?.readyState === 1}`);
+      
+      // Don't disturb the queue yet, will retry next cycle
+      return;
     }
+    
+    // Remove matched users from the actual queue
+    matchmakingQueue.splice(matchmakingQueue.indexOf(user1Id), 1);
+    matchmakingQueue.splice(matchmakingQueue.indexOf(user2Id), 1);
+    
+    console.log(`Users ${user1Id} and ${user2Id} removed from queue for matching`);
+    console.log(`Queue now contains: [${matchmakingQueue.join(', ')}]`);
     
     // Create match
     const matchId = generateMatchId();
@@ -773,6 +880,10 @@ function handleDisconnect(userId) {
       }
     }
   }
+  
+  // Track disconnected user for potential reconnection
+  const wasInQueue = matchmakingQueue.includes(userId);
+  disconnectedUsers.set(userId, { timestamp: Date.now(), wasInQueue });
 }
 
 /**
@@ -1324,6 +1435,33 @@ async function fetchUserDetails(user1Id, user2Id) {
  */
 function generateMatchId() {
   return Date.now().toString(36) + Math.random().toString(36).substring(2, 5).toUpperCase();
+}
+
+/**
+ * Clean up disconnected users from the queue and active matches
+ */
+function cleanupDisconnectedUsers() {
+  const now = Date.now();
+  
+  for (const [userId, { timestamp, wasInQueue }] of disconnectedUsers.entries()) {
+    // If the user was in the queue and the grace period has passed, remove them from the queue
+    if (wasInQueue && now - timestamp >= QUEUE_GRACE_PERIOD_MS) {
+      console.log(`Removing user ${userId} from matchmaking queue due to timeout`);
+      const queueIndex = matchmakingQueue.indexOf(userId);
+      if (queueIndex !== -1) {
+        matchmakingQueue.splice(queueIndex, 1);
+      }
+      
+      // Optionally, notify the user about the removal (if they reconnect later)
+      // ...
+    }
+    
+    // Remove from disconnected users map if the user has reconnected or grace period has passed
+    if (now - timestamp >= QUEUE_GRACE_PERIOD_MS) {
+      console.log(`Removing user ${userId} from disconnected users list`);
+      disconnectedUsers.delete(userId);
+    }
+  }
 }
 
 module.exports = { setupWebSocket };
