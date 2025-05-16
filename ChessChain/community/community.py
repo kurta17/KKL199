@@ -22,7 +22,7 @@ from utils.utils import lottery_selection
 from utils.merkle import MerkleTree
 from ipv8.messaging.payload_dataclass import DataClassPayload, Serializable
 
-
+from community.raiting import RatingManager
 
 
 
@@ -56,7 +56,8 @@ class ChessCommunity(Community):
         self.tx_db = self.db_env.open_db(b'transactions')
         self.stake_db = self.db_env.open_db(b'stakes')
         self.moves_db = self.db_env.open_db(b'moves')
- 
+        self.rating_manager = RatingManager(self.db_env)
+
         # Initialize state
         self.transactions: Set[str] = set()
         self.mempool: Dict[str, ChessTransaction] = {}
@@ -1366,7 +1367,14 @@ class ChessCommunity(Community):
             
             # Update transaction status, remove from mempool and pending
             self.mark_transactions_as_processed(block.transaction_hashes)
-            
+            for tx_hash in block.transaction_hashes:
+                with self.db_env.begin(db=self.tx_db) as txn:
+                    tx_data = txn.get(tx_hash.encode())
+                    if tx_data:
+                        tx, _ = default_serializer.unpack_serializable(ChessTransaction, tx_data)
+                        winner_pubkey = tx.winner  # Should be the winner's pubkey hex
+                        self.rating_manager.update_user_rating(winner_pubkey, 10)  # Add 10 points to winner
+                        
             # Reward the proposer
             await self.reward_proposer(block.proposer_pubkey_hex)
             
