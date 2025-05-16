@@ -1,0 +1,79 @@
+# filepath: /Users/levandalbashvili/Documents/GitHub/chessweb/.gitignore
+# Node.js dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+yarn-debug.log
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Temporary scripts and documentation files
+apply-emergency-sql.sh
+apply-rls-policy.sh
+BYPASS-REGISTRATION-DOCS.md
+check-bypass-route.sh
+check-dependencies.sh
+commit-game-fixes.sh
+COMPREHENSIVE-BYPASS-GUIDE.md
+debug-dev.sh
+emergency-auth-fix.sh
+emergency-bypass-fix.sh
+fix_all_rls_policies.sql
+fix-all-registration-issues.sh
+fix-registration.sh
+README-BYPASS-FIX.md
+setup-demo.sh
+setup-supabase.sh
+simple-bypass-fix.sh
+SUPABASE_SETUP.md
+test-api-endpoints.sh
+test-bypass-endpoint.sh
+test-bypass-registration.sh
+test-frontend-registration.sh
+
+# Build outputs
+/dist
+/build
+/Frontend/chess-website/dist
+/Frontend/chess-website/build
+
+# Legacy directory with old scripts and docs
+/legacy/
+
+# Editor directories and files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Debug logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Local development files
+*.local
+
+# Jest coverage
+coverage/
