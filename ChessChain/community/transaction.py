@@ -165,3 +165,29 @@ class Transaction:
     def is_transaction_in_db(self, nonce: str) -> bool:
         with self.db_env.begin(db=self.tx_db, write=False) as txn:
             return txn.get(nonce.encode('utf-8')) is not None
+
+    def add_to_mempool(self, tx: ChessTransaction) -> None:
+        """Add a transaction to the mempool and store it in the database.
+        
+        Args:
+            tx: The transaction to add
+        """
+        if tx.nonce in self.mempool:
+            self.logger.info(f"Transaction {tx.nonce} already in mempool. Skipping.")
+            return
+            
+        # Add to mempool
+        self.mempool[tx.nonce] = tx
+        self.logger.info(f"Added transaction {tx.nonce} to mempool. Mempool size: {len(self.mempool)}")
+        
+        # Store in database
+        try:
+            packed_tx = default_serializer.pack_serializable(tx)
+            with self.db_env.begin(write=True) as txn:
+                txn.put(tx.nonce.encode('utf-8'), packed_tx, db=self.tx_db)
+            self.logger.info(f"Stored transaction {tx.nonce} in database")
+        except Exception as e:
+            self.logger.error(f"Failed to store transaction {tx.nonce} in database: {e}")
+            # If database storage fails, remove from mempool to maintain consistency
+            if tx.nonce in self.mempool:
+                del self.mempool[tx.nonce]

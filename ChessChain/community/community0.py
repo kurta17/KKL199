@@ -157,3 +157,140 @@ class ChessCommunity(Community):
                     key_repr = key.hex() if isinstance(key, bytes) else str(key)
                     print(f"Error loading transaction {key_repr}: {e}")
         return out
+
+    def get_stored_moves(self, match_id: str) -> List[MoveData]:
+        """Get all moves for a given match_id from the database.
+        
+        Args:
+            match_id: The ID of the match to retrieve moves for
+            
+        Returns:
+            List of MoveData objects for the specified match, sorted by move ID
+        """
+        out = []
+        match_prefix = f"{match_id}:"  # Using the match_id: prefix for composite keys
+        
+        with self.db_env.begin(db=self.moves_db) as txn:
+            cursor = txn.cursor()
+            
+            # First try with the composite key format: match_id:move_id
+            for key, raw in cursor:
+                try:
+                    key_str = key.decode()
+                    if key_str.startswith(match_prefix):
+                        deserialized_move, _ = default_serializer.unpack_serializable(MoveData, raw)
+                        out.append(deserialized_move)
+                except Exception as e:
+                    key_repr = key.hex() if isinstance(key, bytes) else str(key)
+                    print(f"Error loading move {key_repr}: {e}")
+            
+            # If no moves found with composite key, try legacy key format: match_id_move_id
+            if not out:
+                legacy_prefix = f"{match_id}_"
+                cursor.first()  # Reset cursor
+                for key, raw in cursor:
+                    try:
+                        key_str = key.decode()
+                        if key_str.startswith(legacy_prefix):
+                            deserialized_move, _ = default_serializer.unpack_serializable(MoveData, raw)
+                            out.append(deserialized_move)
+                    except Exception as e:
+                        key_repr = key.hex() if isinstance(key, bytes) else str(key)
+                        print(f"Error loading move with legacy key {key_repr}: {e}")
+        
+        # Sort moves by ID to ensure correct ordering
+        return sorted(out, key=lambda x: x.id)
+
+    def generate_fake_match(self) -> None:
+        """Generate a fake match and start sending moves."""
+        import uuid
+        from asyncio import create_task
+        
+        match_id = str(uuid.uuid4())
+        winner = "player1"  # Example winner
+        nonce = str(uuid.uuid4())  # Unique nonce for the transaction
+
+        # Define the sequence of moves
+        current_time = time.time()
+        raw_move_definitions = [
+            {"id": 1, "player": "player1_pubkey_hex", "move": "e4", "timestamp": current_time},
+            {"id": 2, "player": "player2_pubkey_hex", "move": "e5", "timestamp": current_time + 1},
+            {"id": 3, "player": "player1_pubkey_hex", "move": "Nf3", "timestamp": current_time + 2},
+            {"id": 4, "player": "player2_pubkey_hex", "move": "Nc6", "timestamp": current_time + 3},
+            {"id": 5, "player": "player1_pubkey_hex", "move": "Bc4", "timestamp": current_time + 4}
+        ]
+
+        moves_list = []
+        for move_def in raw_move_definitions:
+            move_signature_placeholder = "fake_signature_" + str(move_def["id"])
+            
+            move = MoveData(
+                match_id=match_id,
+                id=move_def["id"],
+                player=move_def["player"],
+                move=move_def["move"],
+                timestamp=move_def["timestamp"],
+                signature=move_signature_placeholder
+            )
+            moves_list.append(move)
+       
+        self.logger.info(f"Generating fake match {match_id} with {len(moves_list)} moves. Winner: {winner}, Nonce: {nonce}")
+        
+        # Check if send_moves exists, otherwise define it
+        if hasattr(self, 'send_moves'):
+            create_task(self.send_moves(match_id, winner, moves_list, nonce))
+        else:
+            self.logger.error("Cannot send moves: 'send_moves' method not found in ChessCommunity")
+            print("Missing send_moves method in ChessCommunity class. Please implement it first.")
+            
+    async def send_moves(self, match_id: str, winner: str, moves: List[MoveData], nonce: str) -> None:
+        """Send a sequence of moves as a transaction."""
+        import hashlib
+        from ipv8.messaging.serialization import default_serializer
+        
+        self.logger.info(f"Sending {len(moves)} moves for match {match_id}")
+        
+        # Process each move
+        for move in moves:
+            # Sign the move with our private key
+            move_data = f"{match_id}:{move.id}:{move.player}:{move.move}:{move.timestamp}".encode()
+            move.signature = self.sk.sign(move_data).hex()
+            
+            # Broadcast the move to peers
+            self.logger.info(f"Broadcasting move: {move.move} (ID: {move.id})")
+            peers = self.network.get_peers_for_service(self.community_id)
+            if peers:
+                for peer in peers:
+                    self.ez_send(peer, move)
+            else:
+                self.logger.warning("No peers available to send moves to")
+            
+            # Simulate delay between moves
+            await asyncio.sleep(0.5)
+        
+        # Create a hash of all moves
+        moves_hash = hashlib.sha256(''.join([f"{m.id}:{m.move}" for m in moves]).encode()).hexdigest()
+        
+        # Create and send the transaction
+        tx_data = f"{match_id}:{winner}:{nonce}:{self.pubkey_bytes.hex()}".encode()
+        tx_signature = self.sk.sign(tx_data).hex()
+        
+        transaction = ChessTransaction(
+            match_id=match_id,
+            winner=winner,
+            moves_hash=moves_hash,
+            nonce=nonce,
+            proposer_pubkey_hex=self.pubkey_bytes.hex(),
+            signature=tx_signature
+        )
+        
+        # Add to mempool and broadcast
+        self.transaction.add_to_mempool(transaction)
+        
+        peers = self.network.get_peers_for_service(self.community_id)
+        if peers:
+            for peer in peers:
+                self.ez_send(peer, transaction)
+            self.logger.info(f"Sent transaction for match {match_id} with {len(moves)} moves to {len(peers)} peers")
+        else:
+            self.logger.warning("No peers available to send transaction to")
