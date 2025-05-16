@@ -1,13 +1,20 @@
 import asyncio
 import json
 import time
-from .community0 import ChessCommunity
+from typing import TYPE_CHECKING
+
+# Use TYPE_CHECKING to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from . import ChessCommunity
+else:
+    from . import ChessCommunity
+
 from models.models import BlockSyncRequest, BlockSyncResponse, ProposedBlockPayload
 from ipv8.types import Peer
 from ipv8.messaging.serialization import default_serializer
 
 class Sync:
-    def __init__(self, community: ChessCommunity):
+    def __init__(self, community: 'ChessCommunity'):
         self.community = community
         self.logger = community.logger
         self.db_env = community.db_env

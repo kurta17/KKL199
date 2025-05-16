@@ -1,9 +1,9 @@
 from typing import Dict, Any
 from ipv8.configuration import ConfigBuilder, Strategy, WalkerDefinition, default_bootstrap_defs
 
-# Use direct imports for running directly from ChessChain directory
+# Use relative imports for running from the ChessChain directory
 from utils.utils import check_port
-from ChessChain.community.community0 import ChessCommunity
+from community.community0 import ChessCommunity
 
 
 def create_ipv8_config(port: int = 8000) -> Dict[str, Any]:

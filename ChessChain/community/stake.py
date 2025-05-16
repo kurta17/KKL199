@@ -1,7 +1,13 @@
-from .community0 import ChessCommunity
+from typing import TYPE_CHECKING
+
+# Use TYPE_CHECKING to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from . import ChessCommunity
+else:
+    from . import ChessCommunity
 
 class Stake:
-    def __init__(self, community: ChessCommunity):
+    def __init__(self, community: 'ChessCommunity'):
         self.community = community
         self.stakes = community.stakes
         self.db_env = community.db_env

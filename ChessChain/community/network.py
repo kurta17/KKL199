@@ -1,17 +1,25 @@
 import asyncio
 import time
-from typing import List
-from .community0 import ChessCommunity
+from typing import List, TYPE_CHECKING
+
+# Use TYPE_CHECKING to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from . import ChessCommunity
+else:
+    from . import ChessCommunity
+
 from ipv8.types import Peer
 
-class Network:
-    def __init__(self, community: ChessCommunity):
+class ChessNetwork:
+    def __init__(self, community: 'ChessCommunity'):
         self.community = community
         self.logger = community.logger
         self.pubkey_bytes = community.pubkey_bytes
 
     def select_propagation_peers(self, count: int = 5) -> List[Peer]:
-        peers = self.community.get_peers()
+        # Access IPv8's network property directly through the overlay
+        # Instead of calling get_peers() which would cause recursion
+        peers = self.community.network.get_peers_for_service(self.community.community_id)
         if not peers:
             return []
         if len(peers) <= count:
@@ -30,12 +38,13 @@ class Network:
         peer_discovery_time = 50
         start_time = time.time()
         while time.time() - start_time < peer_discovery_time:
-            peers = self.community.get_peers()
+            # Access IPv8's network property directly instead of calling get_peers()
+            peers = self.community.network.get_peers_for_service(self.community.community_id)
             if peers:
                 self.logger.info(f"Found {len(peers)} peers. Continuing startup sequence.")
                 break
             await asyncio.sleep(2)
-        peers = self.community.get_peers()
+        peers = self.community.network.get_peers_for_service(self.community.community_id)
         if not peers:
             self.logger.warning("No peers found during discovery period. Will operate in standalone mode.")
         else:

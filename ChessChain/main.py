@@ -24,7 +24,7 @@ from ipv8_service import IPv8
 
 # Use direct imports when running from ChessChain directory
 from config.config import create_ipv8_config
-from ChessChain.community.community0 import ChessCommunity
+from community.community0 import ChessCommunity
 from utils.interface import manual_send_loop
 
 

@@ -24,7 +24,8 @@ from .transaction import Transaction
 from .moves import Moves
 from .proposer import Proposer
 from .stake import Stake
-from .network import Network
+# Update the import to use the renamed class
+from .network import ChessNetwork
 
 class ChessCommunity(Community):
     """Community implementation for chess game transactions using IPv8."""
@@ -102,7 +103,7 @@ class ChessCommunity(Community):
         self.moves = Moves(self)
         self.proposer = Proposer(self)
         self.stake = Stake(self)
-        self.network = Network(self)
+        self.chess_network = ChessNetwork(self)
 
         self.blockchain.initialize_blockchain()
 
@@ -141,4 +142,18 @@ class ChessCommunity(Community):
 
     def started(self) -> None:
         """Called when the community is started."""
-        self.network.startup_sequence()
+        # Create a task to run the startup sequence asynchronously
+        asyncio.create_task(self.chess_network.startup_sequence())
+    
+    def get_stored_transactions(self) -> List[ChessTransaction]:
+        """Get all transactions stored in the database."""
+        out = []
+        with self.db_env.begin(db=self.tx_db) as txn:
+            for key, raw in txn.cursor():
+                try:
+                    deserialized_tx, _ = default_serializer.unpack_serializable(ChessTransaction, raw)
+                    out.append(deserialized_tx)
+                except Exception as e:
+                    key_repr = key.hex() if isinstance(key, bytes) else str(key)
+                    print(f"Error loading transaction {key_repr}: {e}")
+        return out

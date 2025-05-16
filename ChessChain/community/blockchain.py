@@ -1,13 +1,19 @@
 import hashlib
 import time
-from typing import List
-from .community0 import ChessCommunity
+from typing import List, TYPE_CHECKING
+
+# Use TYPE_CHECKING to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from . import ChessCommunity
+else:
+    from . import ChessCommunity
+
 from models.models import ProposedBlockPayload, ChessTransaction
 from ipv8.messaging.serialization import default_serializer
 from utils.merkle import MerkleTree
 
 class Blockchain:
-    def __init__(self, community: ChessCommunity):
+    def __init__(self, community: 'ChessCommunity'):
         self.community = community
         self.db_env = community.db_env
         self.logger = community.logger

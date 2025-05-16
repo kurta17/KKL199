@@ -1,14 +1,20 @@
 import asyncio
 import time
 import uuid
-from typing import List
-from .community0 import ChessCommunity
+from typing import List, TYPE_CHECKING
+
+# Use TYPE_CHECKING to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from . import ChessCommunity
+else:
+    from . import ChessCommunity
+
 from models.models import MoveData, ChessTransaction
 from ipv8.messaging.serialization import default_serializer
 from ipv8.types import Peer
 
 class Moves:
-    def __init__(self, community: ChessCommunity):
+    def __init__(self, community: 'ChessCommunity'):
         self.community = community
         self.logger = community.logger
         self.db_env = community.db_env

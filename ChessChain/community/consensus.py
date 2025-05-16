@@ -1,15 +1,22 @@
 import asyncio
 import hashlib
 import time
-from typing import Dict, List
-from .community0 import ChessCommunity
+from typing import Dict, List, TYPE_CHECKING
+
+# Use TYPE_CHECKING to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from . import ChessCommunity
+else:
+    from . import ChessCommunity
+
 from models.models import ProposedBlockPayload, ProposerAnnouncement, ValidatorVote, BlockConfirmation, ChessTransaction
 from ipv8.messaging.serialization import default_serializer
 from utils.merkle import MerkleTree
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from ipv8.types import Peer
 
 class Consensus:
-    def __init__(self, community: ChessCommunity):
+    def __init__(self, community: 'ChessCommunity'):
         self.community = community
         self.logger = community.logger
         self.stakes = community.stakes

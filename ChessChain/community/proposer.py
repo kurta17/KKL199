@@ -1,18 +1,23 @@
 import hashlib
 import time
-from typing import List
+from typing import List, TYPE_CHECKING
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from ipv8.messaging.serialization import default_serializer
 
-from ChessChain.utils.utils import lottery_selection
-from .community0 import ChessCommunity
+# Use TYPE_CHECKING to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from . import ChessCommunity
+else:
+    from . import ChessCommunity
+
+from utils.utils import lottery_selection
 from models.models import ProposedBlockPayload, ProposerAnnouncement
 from ipv8.types import Peer
 from utils.merkle import MerkleTree
 
 class Proposer:
-    def __init__(self, community: ChessCommunity):
+    def __init__(self, community: 'ChessCommunity'):
         self.community = community
         self.logger = community.logger
         self.stakes = community.stakes
