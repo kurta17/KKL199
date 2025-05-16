@@ -3,7 +3,7 @@ from ipv8.configuration import ConfigBuilder, Strategy, WalkerDefinition, defaul
 
 # Use direct imports for running directly from ChessChain directory
 from utils.utils import check_port
-from community.community import ChessCommunity
+from ChessChain.community.community0 import ChessCommunity
 
 
 def create_ipv8_config(port: int = 8000) -> Dict[str, Any]:

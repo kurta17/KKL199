@@ -6,16 +6,16 @@ This application implements a proof-of-stake blockchain for recording chess matc
 import ctypes
 import os
 
-# # Manually load libsodium.dll
-# libsodium_path = r"C:\Users\kerel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\libnacl\libsodium.dll"
-# if os.path.exists(libsodium_path):
-#     try:
-#         ctypes.WinDLL(libsodium_path)
-#         print(f"[+] Successfully loaded libsodium.dll from {libsodium_path}")
-#     except Exception as e:
-#         print(f"[!] Failed to load libsodium.dll: {e}")
-# else:
-#     print(f"[!] Could not find libsodium.dll at {libsodium_path}")
+# Manually load libsodium.dll
+libsodium_path = r"C:\Users\kerel\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\libnacl\libsodium.dll"
+if os.path.exists(libsodium_path):
+    try:
+        ctypes.WinDLL(libsodium_path)
+        print(f"[+] Successfully loaded libsodium.dll from {libsodium_path}")
+    except Exception as e:
+        print(f"[!] Failed to load libsodium.dll: {e}")
+else:
+    print(f"[!] Could not find libsodium.dll at {libsodium_path}")
 
 import os
 import argparse
@@ -24,7 +24,7 @@ from ipv8_service import IPv8
 
 # Use direct imports when running from ChessChain directory
 from config.config import create_ipv8_config
-from community.community import ChessCommunity
+from ChessChain.community.community0 import ChessCommunity
 from utils.interface import manual_send_loop
 
 

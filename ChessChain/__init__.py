@@ -7,4 +7,4 @@ __version__ = "0.1.0"
 
 # Make core components accessible from the top-level package
 from ChessChain.models.models import ChessTransaction
-from ChessChain.community.community import ChessCommunity
+from ChessChain.community.community0 import ChessCommunity

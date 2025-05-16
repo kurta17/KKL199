@@ -1,7 +1,7 @@
 import base64
 from asyncio import create_task, sleep
  
-from community.community import ChessCommunity
+from community.community0 import ChessCommunity
  
  
 async def manual_send_loop(comm: ChessCommunity) -> None:
