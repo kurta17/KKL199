@@ -1,0 +1,128 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+
+:root {
+  font-family: 'Poppins', system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.6;
+  font-weight: 400;
+  color-scheme: light dark;
+  color: #e0e0e0;
+  background-color: #1a1a1a;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  --primary-gold: 212, 175, 55; /* #d4af37 */
+  --secondary-gold: 184, 151, 46; /* #b8972e */
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: url('./assets/chess-bg.jpg') no-repeat center center fixed;
+  background-size: cover;
+}
+
+a {
+  font-weight: 500;
+  color: #d4af37;
+  text-decoration: none;
+}
+a:hover {
+  color: #b8972e;
+}
+
+/* Glassmorphism for cards */
+.glass-card {
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 16px;
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+/* Custom animations */
+@keyframes fadeIn {
+  0% { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.8s ease-in-out;
+}
+
+/* Buttons */
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.75rem 1.5rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  font-family: inherit;
+  background: linear-gradient(to right, rgb(var(--primary-gold)), rgb(var(--secondary-gold)));
+  color: #1a1a1a;
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.3s ease;
+}
+button:hover {
+  transform: translateY(-2px);
+  background: linear-gradient(to right, rgb(var(--secondary-gold)), rgb(var(--primary-gold)));
+}
+button:focus,
+button:focus-visible {
+  outline: 2px solid #d4af37;
+  outline-offset: 2px;
+}
+
+/* Headings */
+h1 {
+  font-size: 2.5rem;
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+h2 {
+  font-size: 1.8rem;
+  font-weight: 600;
+}
+
+/* Input Fields */
+input {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  color: #e0e0e0;
+  font-size: 0.9rem;
+  transition: border-color 0.3s ease;
+}
+input::placeholder {
+  color: #a0a0a0;
+}
+input:focus {
+  border-color: #d4af37;
+  outline: none;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #1a1a1a;
+    background-color: #f5f5f5;
+  }
+  a:hover {
+    color: #b8972e;
+  }
+  button {
+    background: linear-gradient(to right, rgb(var(--primary-gold)), rgb(var(--secondary-gold)));
+    color: #1a1a1a;
+  }
+}
