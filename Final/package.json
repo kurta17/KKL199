@@ -1,0 +1,33 @@
+{
+  "name": "chessweb",
+  "version": "1.0.0",
+  "description": "Blockchain-based chess platform",
+  "main": "index.js",
+  "scripts": {
+    "start": "bash start-dev.sh",
+    "check": "bash check-dependencies.sh",
+    "frontend": "cd Frontend/chess-website && npm run dev",
+    "backend": "cd backend && npm run dev",
+    "install:all": "npm install && cd Frontend/chess-website && npm install && cd ../../backend && npm install"
+  },
+  "keywords": [
+    "blockchain",
+    "chess",
+    "web3",
+    "cryptography",
+    "game"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/levandalbashvili/chessweb.git"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "dependencies": {
+    "base64-js": "^1.5.1",
+    "tweetnacl": "^1.0.3"
+  }
+}

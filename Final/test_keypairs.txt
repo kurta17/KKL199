@@ -1,0 +1,12 @@
+
+# Test keypairs for ChessChain
+# Generated on 2025-05-16T03:31:45.282Z
+
+# User 1
+export TEST_PRIV_KEY1="SlIeQjEbyzhVngRfjgT8d2KwrshGQLY5GnuxbwDz9hed0L9X8ouOLMb/KV3mipW9iwnXflmvk6jYIzKgmtsKXw=="
+export TEST_PUB_KEY1="ndC/V/KLjizG/yld5oqVvYsJ135Zr5Oo2CMyoJrbCl8="
+
+# User 2
+export TEST_PRIV_KEY2="g5hHR7yGag1rmtxa2lPTHVkAXTkJ1QkhYaac5FA4xHJxK3gKOzkM4cSokDv5Vcl7WRmaRsta7yhPh56ArakyoA=="
+export TEST_PUB_KEY2="cSt4Cjs5DOHEqJA7+VXJe1kZmkbLWu8oT4eegK2pMqA="
+
